@@ -2,6 +2,7 @@
 
 Run:  python -m unittest discover -s tests -v      (from the project folder)
 """
+import re
 import sys
 import tempfile
 import textwrap
@@ -12,14 +13,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from repoatlas import core, languages      # noqa: E402
 
 
-def build(files):
-    """Write `files` into a temp folder, analyse it, return the node table."""
+def analyze(files):
+    """Write `files` into a temp folder and analyse it."""
     with tempfile.TemporaryDirectory() as d:
         for rel, text in files.items():
             p = Path(d) / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(textwrap.dedent(text))
-        return core.analyze(Path(d), "fixture")["nodes"]
+        return core.analyze(Path(d), "fixture")
+
+
+def build(files):
+    """The node table of `files`, analysed."""
+    return analyze(files)["nodes"]
 
 
 def names(node):
@@ -200,6 +206,187 @@ class SymbolOnlyLanguages(unittest.TestCase):
         n = build({"index.html": "<html></html>\n", "site.css": "body { margin: 0 }\n", "x.py": "x = 1\n"})
         self.assertEqual(n["index.html"]["layer"], "interface")
         self.assertEqual(n["site.css"]["layer"], "interface")
+
+
+class Generic(unittest.TestCase):
+    """Links, entry points and inputs / outputs that work the same for every language."""
+
+    def test_go_files_of_one_package_are_linked_by_name(self):
+        n = build({
+            "cmd/main.go": "package main\n\nfunc main() {\n\tquiz := loadQuiz()\n\t_ = quiz\n}\n",
+            "cmd/quiz.go": "package main\n\nfunc loadQuiz() []string { return nil }\n",
+            "other/quiz.go": "package other\n\nfunc loadQuiz() {}\n",      # same name, other package
+        })
+        self.assertEqual(n["cmd/main.go"]["uses"], ["cmd/quiz.go"])
+
+    def test_csharp_is_linked_by_name_across_folders(self):
+        n = build({
+            "Program.cs": "class Program {\n  static void Main(string[] a) { new Greeter().Hi(); }\n}\n",
+            "lib/Greeter.cs": "public class Greeter {\n  public void Hi() {}\n}\n",
+        })
+        self.assertEqual(n["Program.cs"]["uses"], ["lib/Greeter.cs"])
+        self.assertTrue(n["Program.cs"]["entry"])
+
+    def test_file_paths_in_code_are_links(self):
+        n = build({
+            "app.py": "import os\nTEMPLATE = os.path.join('templates', 'x')\npage = open('templates/page.html').read()\n",
+            "templates/page.html": "<html></html>\n",
+            "web/index.html": '<script src="main.js"></script>\n',
+            "web/main.js": "console.log(1)\n",
+        })
+        self.assertEqual(n["app.py"]["uses"], ["templates/page.html"])
+        self.assertEqual(n["web/index.html"]["uses"], ["web/main.js"])
+
+    def test_comments_and_docstrings_are_not_code(self):
+        n = build({
+            "notes.py": '"""Mentions helper.py and @app.get("/x") but uses neither."""\n# see helper.py\nx = 1\n',
+            "helper.py": "y = 2\n",
+        })
+        self.assertEqual(n["notes.py"]["uses"], [])
+        self.assertNotEqual(n["notes.py"]["layer"], "api")
+
+    def test_run_files_name_the_entry_points(self):
+        n = build({
+            "Procfile": "web: python server/run.py\n",
+            "server/run.py": "x = 1\n",
+            "svc/Dockerfile": 'FROM node\nCMD ["node", "src/start.js"]\n',
+            "svc/src/start.js": "const a = 1\n",
+            "Makefile": "run:\n\tpython -m tools.cli\n",
+            "tools/__init__.py": "",
+            "tools/cli.py": "x = 1\n",
+        })
+        for p in ("server/run.py", "svc/src/start.js", "tools/cli.py"):
+            self.assertTrue(n[p]["entry"], p)
+
+    def test_a_container_entrypoint_that_picks_a_command(self):
+        data = analyze({
+            "Dockerfile": 'FROM python\nWORKDIR /app\nCOPY start.py /app/entrypoint\nCOPY ./code /app/code\n'
+                          'ENTRYPOINT ["/app/entrypoint"]\n',
+            "start.py": 'import os, sys\nCMDS = {\n    "server": "gunicorn proj.wsgi --bind 0.0.0.0:8000",\n'
+                        '    "worker": "celery -A proj worker",\n}\nos.chdir("/app/code")\n'
+                        'os.execvp("sh", CMDS[sys.argv[1]].split())\n',
+            "code/proj/__init__.py": "from .tasks import app\n",
+            "code/proj/tasks.py": "app = None\n",
+            "code/proj/wsgi.py": 'import os\nos.environ.setdefault("SETTINGS", "proj.settings")\n',
+            "code/proj/settings.py": 'ROOT = "proj.urls"\n',
+            "code/proj/urls.py": "x = 1\n",
+            "code/worker/jobs.py": "x = 1\n",   # named like the `worker` argument, but not a module: not a target
+        })
+        P = {p["name"]: p for p in data["flow"]["processes"]}
+        self.assertEqual(sorted(P), ["server", "worker"])
+        self.assertEqual(P["server"]["entries"], ["code/proj/wsgi.py"])
+        self.assertEqual(P["server"]["chain"], ["start.py"])
+        self.assertIn("Dockerfile runs start.py, which runs `gunicorn proj.wsgi`.", P["server"]["narrative"])
+        self.assertEqual(P["worker"]["entries"], ["code/proj/__init__.py"])   # bare `proj`, found in the working folder
+        self.assertTrue(data["nodes"]["start.py"]["entry"])
+
+    def test_files_the_framework_loads_by_convention(self):
+        data = analyze({
+            "Procfile": "web: python run.py\n",
+            "run.py": "import shop.models, cart.models\n",
+            "shop/__init__.py": "x = 1\n",
+            "shop/models.py": "x = 1\n",
+            "shop/apps.py": "import shop.signals\n",
+            "shop/signals.py": "x = 1\n",
+            "shop/unused.py": "x = 1\n",
+            "shop/commands/a.py": "x = 1\n",
+            "shop/commands/b.py": "x = 1\n",
+            "shop/commands/c.py": "x = 1\n",
+            "cart/__init__.py": "x = 1\n",
+            "cart/models.py": "x = 1\n",
+            "cart/apps.py": "x = 1\n",
+        })
+        n = data["nodes"]
+        self.assertIn("shop/apps.py", n["shop/__init__.py"]["uses"])        # C1: in both packages, imported by neither
+        self.assertIn("shop/commands/a.py", n["shop/__init__.py"]["uses"])  # C2: a folder of look-alike files
+        seen, todo = set(data["flow"]["processes"][0]["entries"]), list(data["flow"]["processes"][0]["entries"])
+        for p in todo:
+            for q in n[p]["uses"]:
+                if q not in seen:
+                    seen.add(q)
+                    todo.append(q)
+        self.assertTrue({"shop/apps.py", "shop/signals.py", "shop/commands/c.py", "cart/apps.py"} <= seen)
+        self.assertNotIn("shop/unused.py", seen)                              # one unused file is just unused
+
+    def test_a_tool_that_runs_the_project_starts_at_its_convention_files(self):
+        data = analyze({
+            "package.json": '{"name": "site", "scripts": {"dev": "next dev", "test": "jest", "format": "prettier --write ."},'
+                            ' "dependencies": {"next": "14"}, "devDependencies": {"prettier": "3"}}',
+            "pages/index.tsx": "import Nav from '../components/Nav'\nexport default function Home() { return <Nav/> }\n",
+            "pages/about.tsx": "export default function About() { return null }\n",
+            "pages/blog.tsx": "export default function Blog() { return null }\n",
+            "components/Nav.tsx": "export default function Nav() { return null }\n",
+        })
+        P = data["flow"]["processes"]
+        self.assertEqual([p["name"] for p in P], ["dev"])                    # "test" is not a running program
+        self.assertEqual(sorted(P[0]["entries"]), ["pages/about.tsx", "pages/blog.tsx", "pages/index.tsx"])
+
+    def test_one_process_per_program_without_launch_files(self):
+        data = analyze({
+            "a/main.go": "package main\n\nfunc main() { helpA() }\n",
+            "a/help.go": "package main\n\nfunc helpA() {}\n",
+            "b/main.go": "package main\n\nfunc main() {}\n",
+        })
+        self.assertEqual([p["name"] for p in data["flow"]["processes"]], ["a/main.go", "b/main.go"])
+        self.assertEqual(data["repo"]["runs"], ["a/main.go", "b/main.go"])
+
+    def test_no_framework_is_hard_coded(self):
+        """Framework knowledge may live in data tables only, never in the logic."""
+        src = Path(core.__file__).parent
+        for path in [src / "core.py"] + sorted((src / "languages").glob("*.py")):
+            text = core.COMMENTS.sub(" ", path.read_text())
+            text = re.sub(r"\nEXT_CATS = \{.*?\n\}", "", text, flags=re.S)   # the library catalogue is data
+            for word in ("django", "flask", "celery", "gunicorn", "uvicorn", "rails", "laravel", "lumen", "spring",
+                         "INSTALLED_APPS", "execute_from_command_line", "manage.py"):
+                self.assertIsNone(re.search(r"\b" + re.escape(word) + r"\b", text, re.I), f"{word} in {path.name}")
+
+    def test_names_built_at_run_time_and_classes_named_in_strings(self):
+        n = build({
+            "cmd/main.go": 'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println(fmt.Sprintf("html/ex%d.html", 1)) }\n',
+            "cmd/html/ex1.html": "<p>1</p>\n",
+            "cmd/html/ex2.html": "<p>2</p>\n",
+            "routes/web.php": "<?php\n$app->post('login', 'AuthController@login');\nMail::send('emails.welcome', $d);\n",
+            "app/AuthController.php": "<?php\nclass AuthController {}\n",
+            "views/emails/welcome.blade.php": "<p>hi</p>\n",
+        })
+        self.assertEqual(n["cmd/main.go"]["uses"], ["cmd/html/ex1.html", "cmd/html/ex2.html"])
+        self.assertEqual(n["routes/web.php"]["uses"], ["app/AuthController.php", "views/emails/welcome.blade.php"])
+
+    def test_compose_command_and_test_helpers(self):
+        data = analyze({
+            "docker-compose.yml": "services:\n  web:\n    command: python -m app.server\n",
+            "app/__init__.py": "",
+            "app/server.py": "x = 1\n",
+            "conftest.py": "import pytest\n",
+            "shop/factories.py": "class OrderFactory: pass\n",
+        })
+        n = data["nodes"]
+        self.assertEqual([p["name"] for p in data["flow"]["processes"]], ["web"])
+        self.assertTrue(n["app/server.py"]["entry"])
+        self.assertEqual(n["conftest.py"]["layer"], "tests")
+        self.assertEqual(n["shop/factories.py"]["layer"], "tests")
+
+    def test_shell_scripts(self):
+        n = build({
+            "install.sh": '#!/bin/sh\n. ./lib.sh\nsetup_dir() {\n  mkdir -p "$DIR"\n}\ncurl -fsSL "${URL:-https://x}"\n',
+            "lib.sh": "say() { echo hi; }\n",
+        })
+        self.assertTrue(n["install.sh"]["entry"])
+        self.assertEqual(n["install.sh"]["uses"], ["lib.sh"])
+        self.assertIn("setup_dir", names(n["install.sh"]))
+        self.assertEqual(n["install.sh"]["io"], ["env", "http_out"])
+
+    def test_inputs_and_outputs_reach_the_flow(self):
+        data = analyze({
+            "main.py": "import sys\nfrom work import go\nif __name__ == '__main__':\n    go(sys.argv[1])\n",
+            "work.py": "from pathlib import Path\ndef go(p):\n    Path(p).write_text('done')\n",
+        })
+        self.assertEqual(data["nodes"]["main.py"]["io"], ["args"])
+        self.assertEqual(data["nodes"]["work.py"]["io"], ["file_out"])
+        P = data["flow"]["processes"][0]
+        self.assertEqual(P["io"], {"args": ["main.py"], "file_out": ["work.py"]})
+        self.assertIn("It takes in command-line arguments, and gives out files.", P["narrative"])
+        self.assertEqual(data["io"]["file_out"], ["Files", "out"])
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ class C(Language):
     extensions = (".c", ".h")
     color = "#555555"
     entry_by_name = True
+    implicit = "none"                     # every use is an #include
 
     def parse(self, f):
         t = f["text"]

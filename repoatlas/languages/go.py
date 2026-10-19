@@ -14,10 +14,11 @@ class Go(Language):
     color = "#00ADD8"
     manifests = ("go.mod",)
     entry_by_name = True
+    implicit = "folder"                   # files of one package share one folder and need no import
 
     def parse(self, f):
         t = f["text"]
-        for blk in re.findall(r"^import\s*\((.*?)\)", t, re.M | re.S):
+        for blk in re.findall(r"^import\s*\((.*?)^\)", t, re.M | re.S):   # up to the closing line: comments may hold ")"
             f["imports"] += re.findall(r'"([^"]+)"', blk)
         f["imports"] += re.findall(r'^import\s+(?:\w+\s+)?"([^"]+)"', t, re.M)
         f["entry"] = bool(re.search(r"^package\s+main\b", t, re.M) and re.search(r"^func\s+main\s*\(", t, re.M))

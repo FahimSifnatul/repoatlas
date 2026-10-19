@@ -9,6 +9,10 @@ What a language file provides
     parse(f)                    fill f["symbols"], f["imports"], f["doc"], f["entry"]
     prepare(project)            (optional) build indexes once, e.g. read go.mod
     resolve(project, f)         turn f["imports"] into (files inside the repo, outside libraries)
+    implicit / entry_re         (optional) where names are visible without an import, what a main() looks like
+
+Without resolve() a language is still linked: the core follows file paths written in any file, and names
+a file uses that another file defines (see `implicit`).
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import re
 from pathlib import Path
 
 ROUTE_RES = [
-    re.compile(r"\b(?:app|router|routes?)\.(get|post|put|delete|patch|all)\(\s*['\"`]([^'\"`]+)['\"`]"),
+    re.compile(r"\b(?:app|router|routes?|Route)(?:\.|->|::)(get|post|put|delete|patch|all|any)\(\s*['\"`]([^'\"`]+)['\"`]"),
     re.compile(r"@(Get|Post|Put|Delete|Patch)Mapping\(\s*(?:value\s*=\s*|path\s*=\s*)?\"([^\"]*)\""),
     re.compile(r"\.(GET|POST|PUT|DELETE|PATCH)\(\s*\"([^\"]+)\""),
     re.compile(r"HandleFunc\(\s*\"([^\"]+)\""),
@@ -88,12 +92,12 @@ def header_doc(text: str) -> str:
 
 
 def add_routes(f: dict) -> None:
-    """Spot web endpoints written as app.get("/x"), @GetMapping("/x"), r.GET("/x") or HandleFunc("/x")."""
+    """Spot web endpoints written as app.get("/x"), Route::get("/x"), @GetMapping("/x"), r.GET("/x") or HandleFunc("/x")."""
     for rx in ROUTE_RES:
         for m in rx.finditer(f["text"]):
             g = m.groups()
             verb, path = (g[0].upper(), g[1]) if len(g) == 2 else ("ANY", g[0])
-            if path.startswith("/"):
+            if path.startswith("/") or "->" in m.group(0) or "::" in m.group(0):   # app.get("port") is a setting
                 f["symbols"].append(dict(k="route", n=path, sig=verb, doc="", line=line_of(f["text"], m.start())))
 
 
@@ -139,17 +143,24 @@ class Project:
 class Language:
     name = ""                  # shown in the GUI and used as the key everywhere
     extensions: tuple = ()     # e.g. (".py",)
+    interpreters: tuple = ()   # a script with no extension starting "#!/usr/bin/env php" is this language
     color = "#7d8aa5"          # language bar colour
     manifests: tuple = ()      # file names the scanner should remember: ("go.mod",)
     skip_suffixes: tuple = ()  # files to ignore even though the extension matches: (".d.ts",)
     regex_routes = True        # look for app.get("/x")-style endpoints
     header_comments = True     # use the comment at the top of a file as its description
-    entry_by_name = False      # main.x / index.x / app.x may be a program entry point
+    entry_by_name = True       # main.x / index.x / app.x may be a program entry point
+    entry_re = None            # a pattern that marks a program entry point, e.g. r"static void main\("
     default_layer = None       # e.g. "interface" for HTML and CSS
-    stem_layers: dict = {}     # file-name words with a special meaning in this language
+    markup = False             # a page or style sheet, not a program: never the project's main language
+    stem_layers: dict = {}     # file / folder-name words with a special meaning in this language
+    implicit = "repo"          # where a name is usable without an import: "repo", "folder" (one package
+                               # per folder, like Go) or "none" (every use is an import that resolve() follows)
 
     def analyze(self, f: dict) -> None:
         self.parse(f)
+        if f["text"].startswith("#!") or (self.entry_re and re.search(self.entry_re, f["text"], re.M)):
+            f["entry"] = True   # a script with a shebang, or a main() the language recognises
         if self.regex_routes:
             add_routes(f)
         if not f["doc"] and self.header_comments:

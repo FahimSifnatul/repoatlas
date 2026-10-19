@@ -23,7 +23,7 @@ class JvmIndex:
                 if hit != path:
                     uses.add(hit)
             elif ".".join(parts[:2]) not in self.own and not imp.startswith(("java.", "kotlin.", "android.")):
-                ext.add((".".join(parts[:3]), imp))
+                ext.add((".".join(x for x in parts[:3] if not x[:1].isupper()), imp))   # jakarta.persistence, not .Entity
         return uses, ext
 
 
@@ -31,7 +31,7 @@ class Java(Language):
     name = "Java"
     extensions = (".java",)
     color = "#b07219"
-    entry_by_name = True
+    implicit = "folder"                          # classes in the same package need no import
     type_keywords = "class|interface|enum|record"
     entry_re = r"static\s+void\s+main\s*\(|@SpringBootApplication"
     function_re = None                           # Java has no top-level functions
@@ -41,7 +41,6 @@ class Java(Language):
         m = re.search(r"^\s*package\s+([\w.]+)", t, re.M)
         f["pkg"] = m.group(1) if m else ""
         f["imports"] = [i.rstrip(".") for i in re.findall(r"^\s*import\s+(?:static\s+)?([\w.]+)", t, re.M)]
-        f["entry"] = bool(re.search(self.entry_re, t, re.M))
         lines = t.splitlines()
         pat = (r"^\s*(?:(?:public|private|protected|internal|abstract|final|open|data|sealed|static)\s+)*"
                rf"({self.type_keywords})\s+(\w+)")

@@ -22,7 +22,7 @@ repoatlas/                    the Python package (what gets installed)
     base.py                     Language base class and shared helpers
     python.py  javascript.py  typescript.py  vue.py  svelte.py
     go.py  java.py  kotlin.py  rust.py  c.py  cpp.py
-    ruby.py  php.py  csharp.py  swift.py  scala.py  html.py  css.py
+    ruby.py  php.py  csharp.py  swift.py  scala.py  shell.py  html.py  css.py
 tests/                      a fixture repository per language, the command, and the installer
 install.sh                  the one-line installer
 scripts/                    build_binary.py (single-file executable), personalize.sh, update_formula.sh
@@ -32,7 +32,10 @@ docs/                       screenshots and a finished example
 
 `core.py` knows nothing about any particular language. Everything language-specific (what an import looks
 like, how it maps to a file, what counts as a function, the colour in the language bar) lives in that
-language's file.
+language's file. The core adds what works the same everywhere: file paths and module names written in the code, names a file
+uses that another file defines, launch files (Dockerfile, compose, Procfile, Makefile ...), files a framework
+loads by convention, and inputs / outputs. It must never name a framework: framework knowledge lives only in
+data tables (`EXT_CATS`, `LAUNCH_FILES`), and a test checks that.
 
 ## Adding a language
 
@@ -59,7 +62,9 @@ class Lua(Language):
 ```
 
 Optional hooks: `prepare(project)` to read a manifest once (see `go.py`), `manifests`, `entry_by_name`,
-`default_layer`, `stem_layers`, `skip_suffixes`. Start from `ruby.py` (smallest) or `go.py` (typical), then add a
+`entry_re` (what a `main()` looks like), `interpreters` (`#!` names for scripts with no extension), `implicit` (`"repo"`, `"folder"` or `"none"`: where a name is usable
+without an import; set `"none"` once `resolve()` follows every import), `default_layer`, `stem_layers`,
+`skip_suffixes`. Start from `ruby.py` (smallest) or `go.py` (typical), then add a
 fixture to `tests/test_languages.py`.
 
 ## Ground rules

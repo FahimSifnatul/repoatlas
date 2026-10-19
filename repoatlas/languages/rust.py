@@ -13,6 +13,7 @@ class Rust(Language):
     color = "#b7603c"
     manifests = ("Cargo.toml",)
     entry_by_name = True
+    implicit = "none"                     # every use is a `mod` or `use`
 
     def parse(self, f):
         t = f["text"]

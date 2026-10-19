@@ -28,4 +28,5 @@ for _cls in ALL:
             raise RuntimeError(f"{_ext} is claimed by both {BY_EXT[_ext].name} and {_cls.name}")
         BY_EXT[_ext] = _cls
 MANIFESTS = {m for c in ALL for m in c.manifests}
+BY_INTERPRETER = {i: c for c in ALL for i in c.interpreters}
 COLORS = {c.name: c.color for c in ALL}

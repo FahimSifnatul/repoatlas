@@ -111,9 +111,11 @@ class JsIndex:
 class JavaScript(Language):
     name = "JavaScript"
     extensions = (".js", ".jsx", ".mjs", ".cjs")
+    interpreters = ("node", "nodejs", "bun", "deno")
     color = "#d9b611"
     manifests = ("package.json",)
     entry_by_name = True
+    implicit = "none"                     # every use is an import
 
     def parse(self, f):
         f["imports"] = [s for rx in IMPORTS for s in rx.findall(f["text"])]

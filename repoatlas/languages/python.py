@@ -58,17 +58,20 @@ def _regex_imports(text):
 class Python(Language):
     name = "Python"
     extensions = (".py",)
+    interpreters = ("python", "python3", "python2")
     color = "#3572A5"
     manifests = ("pyproject.toml", "__init__.py")   # __init__.py files mark package roots, even empty ones
     regex_routes = False                            # routes come from decorators (see _route)
     header_comments = False                         # module docstrings are used instead
     entry_by_name = True
-    stem_layers = {"view": "api", "views": "api"}   # Django-style views.py is the request layer
+    implicit = "none"                               # every use is an import
+    stem_layers = {"view": "api", "views": "api"}   # Django-style views.py / views/ is the request layer
 
     # ---- parsing
     def parse(self, f):
         text = f["text"]
-        f["entry"] = bool(re.search(r"^if\s+__name__\s*==\s*['\"]__main__['\"]", text, re.M))
+        f["entry"] = (f["path"].endswith("__main__.py")   # what `python -m package` runs
+                      or bool(re.search(r"^if\s+__name__\s*==\s*['\"]__main__['\"]", text, re.M)))
         try:
             tree = ast.parse(text)
         except (SyntaxError, ValueError, RecursionError):
@@ -154,4 +157,9 @@ class Python(Language):
                     uses.add(sib)
                 else:
                     ext.add((parts[0], mod))
+        for h in list(uses):   # importing a.b.c runs a/__init__.py and a/b/__init__.py first
+            pkg = posixpath.dirname(h)
+            while pkg and pkg + "/__init__.py" in project.paths and not d.startswith(pkg):
+                uses.add(pkg + "/__init__.py")
+                pkg = posixpath.dirname(pkg)
         return uses, ext

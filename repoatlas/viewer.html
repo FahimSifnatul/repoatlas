@@ -118,6 +118,7 @@ button.part:hover{background:var(--c);color:#fff;border-color:var(--c)}
 .ref i{width:9px;height:9px;border-radius:50%;background:var(--c);flex:none}
 .ref:hover{border-color:var(--c)}
 .ref.plain{cursor:default}
+.ref[aria-current]{border-color:var(--ink);font-weight:650}
 .ref.plain:hover{border-color:var(--line)}
 
 /* graph: stations connected by lines */
@@ -131,6 +132,7 @@ button.part:hover{background:var(--c);color:#fff;border-color:var(--c)}
 .edges{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
 .edges path{fill:none;stroke-linecap:round;transition:opacity .15s}
 .edges .e{stroke-width:2;opacity:.5}
+.edges .e.conv{stroke-dasharray:5 5}
 .edges .tip{opacity:.6;stroke:none}
 .live .e{stroke-dasharray:7 7;animation:march 1.1s linear infinite}
 @keyframes march{to{stroke-dashoffset:-14}}
@@ -279,6 +281,12 @@ function chips(ids, max = 12) {
   return [...ids.slice(0, max).map(id => ref(id)), ids.length > max ? el('span', {class:'ref plain'}, `+${ids.length - max} more`) : null];
 }
 function sec(title, hint) { return el('div', {class:'sec'}, el('h2', {}, title), hint ? el('p', {}, hint) : null); }
+const IO = D.io || {};
+function ioRow(title, keys, way, who) {      // what comes in / goes out; who: kind -> the parts that do it
+  const ks = (keys || []).filter(k => IO[k] && (IO[k][1] === way || IO[k][1] === 'both'));
+  return ks.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, title),
+    ks.map(k => el('span', {class:'lib', title: who ? who[k].map(i => N[i].name).join(', ') : null}, IO[k][0]))) : null;
+}
 
 /* ---------- graph: auto-layout + connecting lines ---------- */
 function layout(ids, edges) {
@@ -337,14 +345,14 @@ function graph({cols, edges, labels, live, showPath}) {
   const draw = () => {
     sv.replaceChildren(); drawn.length = 0;
     sv.setAttribute('width', inner.scrollWidth); sv.setAttribute('height', inner.scrollHeight);
-    for (const [a, b, wt] of edges) {
+    for (const [a, b, wt, cv] of edges) {   // cv: the framework loads b by convention, no code imports it
       const ea = cards[a], eb = cards[b];
       if (!ea || !eb) continue;
       const x1 = ea.offsetLeft + ea.offsetWidth, y1 = ea.offsetTop + ea.offsetHeight / 2;
       const x2 = eb.offsetLeft - 7, y2 = eb.offsetTop + eb.offsetHeight / 2, dx = Math.max(36, (x2 - x1) / 2);
       const col = colorOf(N[a]);
       const p = document.createElementNS(NS, 'path');
-      p.setAttribute('class', 'e'); p.style.stroke = col;
+      p.setAttribute('class', cv ? 'e conv' : 'e'); p.style.stroke = col;
       p.setAttribute('stroke-width', (1.6 + Math.min(2.4, Math.log2((wt || 1) + 1) * 0.55)).toFixed(2));
       p.setAttribute('d', `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
       const t = document.createElementNS(NS, 'path');
@@ -388,7 +396,8 @@ function overview(first) {
     el('h1', {}, R.name),
     el('p', {class:'lead'}, R.summary),
     el('p', {class:'facts'}, el('b', {}, `A ${R.kind}`), ` with ${pl(R.files, 'file')} and ${num(R.loc)} lines of code`,
-      R.routes ? `, offering ${pl(R.routes, 'web endpoint')}` : '', `.`),
+      R.routes ? `, offering ${pl(R.routes, 'web endpoint')}` : '', `.`,
+      R.runs && R.runs.length > 1 ? ` It runs as ${num(R.runs.length)} programs: ${R.runs.join(', ')}.` : ''),
     langbar(R.langs)));
   f.append(el('p', {class:'hint'}, 'Each floor is one layer of the project, and upper floors rely on the floors below. Click a floor to look inside it, or click any part listed on it to jump straight there.'));
   const main = D.layers.filter(l => l.group === 'stack'), side = D.layers.filter(l => l.group !== 'stack');
@@ -423,6 +432,7 @@ function hero(n) {
       el('p', {class:'facts'}, n.kind === 'file' ? '' : [el('b', {}, num(n.files)), n.files === 1 ? ' file and ' : ' files and '],
         el('b', {}, num(n.loc)), ' lines of code'),
       n.kind === 'file' ? null : langbar(n.langs),
+      ioRow('Takes in', n.io, 'in'), ioRow('Gives out', n.io, 'out'),
       rel && n.uses.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Relies on'), chips(n.uses)) : null,
       rel && n.usedBy.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Used by'), chips(n.usedBy)) : null));
 }
@@ -467,27 +477,36 @@ function nodeView(n) {
 }
 
 /* ---------- how it runs ---------- */
-function flowView() {
-  const F = D.flow, f = document.createDocumentFragment();
+function flowView(i) {
+  const all = D.flow.processes, F = all[i] || all[0], f = document.createDocumentFragment();
   f.append(el('section', {class:'intro'},
     el('h1', {}, 'How it runs'),
+    all.length > 1 ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Programs'),
+      all.map((P, j) => el('button', {class:'ref', style:'--c:var(--ink)', 'aria-current': P === F ? 'true' : null, onclick:() => go('@flow/' + j)}, el('i'), P.name))) : null,
     el('p', {class:'lead'}, F.narrative),
-    el('div', {class:'lrow', style:'margin-top:16px'}, el('span', {class:'lt', style:'min-width:0;margin-right:6px'}, F.kind === 'Entry points' ? 'Starting files' : 'Front door'),
-      F.entries.map(id => ref(id)))));
+    F.command ? el('p', {class:'path'}, F.command) : null,
+    F.chain.length ? el('div', {class:'lrow', style:'margin-top:16px'}, el('span', {class:'lt'}, 'Started by'), F.chain.map(id => ref(id))) : null,
+    el('div', {class:'lrow', style:F.chain.length ? null : 'margin-top:16px'}, el('span', {class:'lt'}, D.flow.kind === 'Entry points' ? 'Starting files' : 'Front door'),
+      F.entries.map(id => ref(id))),
+    ioRow('Takes in', Object.keys(F.io || {}), 'in', F.io), ioRow('Gives out', Object.keys(F.io || {}), 'out', F.io)));
   const words = ['Starts here', 'Calls into', 'Which use', 'Then', 'Down to the basics'];
   const cols = F.stages.map(s => [...s.units, ...(s.more ? [{more:`+${s.more} more`}] : [])]);
   f.append(sec('Step by step', 'Each column is one step further from the start. Click a box to open it.'));
   f.append(graph({cols, edges:F.edges, labels:F.stages.map((_, i) => words[Math.min(i, words.length - 1)]), live:true, showPath:true}));
+  if (D.flow.unreached.length) {
+    f.append(sec('Not on any journey', 'Nothing above starts or loads these. They run some other way (a separate command, the framework itself) or are not used.'));
+    f.append(grid(D.flow.unreached, true));
+  }
   return f;
 }
 
 /* ---------- render ---------- */
 let first = true, lastDepth = 0;
 function render() {
-  const id = route(), isFlow = id === '@flow' && !!D.flow, target = isFlow ? '@flow' : N[id] ? id : '';
+  const id = route(), isFlow = /^@flow(\/|$)/.test(id) && !!D.flow, target = isFlow ? '@flow' : N[id] ? id : '';
   const depth = isFlow ? 1 : target ? chain(target).length + 1 : 0;
   const view = $('view'), crumbs = $('crumbs');
-  view.replaceChildren(isFlow ? flowView() : target ? nodeView(N[target]) : overview(first));
+  view.replaceChildren(isFlow ? flowView(+id.split('/')[1] || 0) : target ? nodeView(N[target]) : overview(first));
   view.classList.remove('zin', 'zout'); void view.offsetWidth;
   if (!first) view.classList.add(depth < lastDepth ? 'zout' : 'zin');
   first = false; lastDepth = depth;
@@ -512,7 +531,7 @@ addEventListener('hashchange', render);
 addEventListener('keydown', e => {
   if (e.key !== 'Escape' || e.target.closest('input,textarea')) return;
   const id = route();
-  if (id === '@flow') go(''); else if (N[id]) go(N[id].parent || '');
+  if (/^@flow(\/|$)/.test(id)) go(''); else if (N[id]) go(N[id].parent || '');
 });
 render();
 })();
