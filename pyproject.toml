@@ -22,8 +22,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_GITHUB_USER/repoatlas"
-Issues = "https://github.com/YOUR_GITHUB_USER/repoatlas/issues"
+Homepage = "https://github.com/FahimSifnatul/repoatlas"
+Issues = "https://github.com/FahimSifnatul/repoatlas/issues"
 
 [project.scripts]
 repoatlas = "repoatlas.cli:main"          # <- this line is what creates the `repoatlas` command

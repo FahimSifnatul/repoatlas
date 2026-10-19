@@ -4,7 +4,7 @@
 # Puts ONE self-contained file called `repoatlas` on your PATH. No sudo, nothing else is touched,
 # and once it is installed you can delete everything you downloaded.
 #
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/repoatlas/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh
 #   ./install.sh                  from a clone of the repo (builds from the clone)
 #   ./install.sh --uninstall      remove it again
 #
@@ -19,11 +19,11 @@
 set -eu
 
 NAME=repoatlas
-REPO="${REPOATLAS_REPO:-YOUR_GITHUB_USER/repoatlas}"
+REPO="${REPOATLAS_REPO:-FahimSifnatul/repoatlas}"
 BASE="${REPOATLAS_BASE_URL:-https://github.com}"
 VERSION="${REPOATLAS_VERSION:-latest}"
 DIR="${REPOATLAS_INSTALL_DIR:-$HOME/.local/bin}"
-REF="${REPOATLAS_REF:-main}"
+REF="${REPOATLAS_REF:-master}"
 MARK="# added by the repoatlas installer"
 TMP=""
 

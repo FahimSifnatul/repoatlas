@@ -1,10 +1,10 @@
 class Repoatlas < Formula
   desc "Turn any code repository into an interactive, layer-by-layer architecture map"
-  homepage "https://github.com/YOUR_GITHUB_USER/repoatlas"
-  url "https://github.com/YOUR_GITHUB_USER/repoatlas/archive/refs/tags/v1.0.0.tar.gz"
+  homepage "https://github.com/FahimSifnatul/repoatlas"
+  url "https://github.com/FahimSifnatul/repoatlas/archive/refs/tags/v1.0.0.tar.gz"
   sha256 "REPLACE_WITH_SHA256_OF_THE_TARBALL"
   license "MIT" # use the licence you actually put in the repo
-  head "https://github.com/YOUR_GITHUB_USER/repoatlas.git", branch: "main"
+  head "https://github.com/FahimSifnatul/repoatlas.git", branch: "master"
 
   # repoatlas only uses Python's standard library, so there are no `resource` blocks to maintain.
   depends_on "python@3.13"

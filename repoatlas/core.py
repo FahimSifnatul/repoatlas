@@ -130,6 +130,7 @@ def cat_of(spec: str):
 
 def scan(root: Path):
     files, man = {}, defaultdict(list)
+    top = os.path.realpath(root).rstrip(os.sep) + os.sep
     for dp, dns, fns in os.walk(root):
         dns[:] = sorted(
             d for d in dns
@@ -139,6 +140,10 @@ def scan(root: Path):
         rd = "" if rd == "." else rd
         for fn in sorted(fns):
             rel = f"{rd}/{fn}" if rd else fn
+            p = os.path.join(dp, fn)
+            # never read a pipe / device, or follow a symlink out of the repo (it could point at ~/.aws or /proc)
+            if not os.path.isfile(p) or (os.path.islink(p) and not os.path.realpath(p).startswith(top)):
+                continue
             if fn in languages.MANIFESTS:
                 man[fn].append(rel)
             if fn.lower().startswith("readme"):
@@ -147,7 +152,6 @@ def scan(root: Path):
             if not plugin or ".min." in fn or fn.endswith(plugin.skip_suffixes):
                 continue
             lang = plugin.name
-            p = os.path.join(dp, fn)
             try:
                 if os.path.getsize(p) > MAX_BYTES:
                     continue
@@ -568,5 +572,6 @@ def analyze(root: Path, name: str):
 def render(data: dict, title: str) -> str:
     import html as _html
     tpl = pkgutil.get_data(__package__, "viewer.html").decode("utf-8")
-    blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    # every "<" escaped: "</script>" or "<!--<script" in a file name can then never end or derail the <script> block
+    blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
     return tpl.replace("__TITLE__", _html.escape(title)).replace("/*__DATA__*/null", blob)

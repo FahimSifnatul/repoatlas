@@ -1,13 +1,21 @@
 name: release
 
-# Push a tag such as v1.0.0 and this publishes a GitHub Release with the single-file `repoatlas`
-# executable attached. install.sh downloads exactly that file.
+# Publishes a GitHub Release with the single-file `repoatlas` executable attached. install.sh downloads exactly that file.
+# Two ways to trigger it:
+#   - bump __version__ in repoatlas/__init__.py and push to master: this tags vX.Y.Z on that commit and releases it
+#     (a push whose version is already tagged does nothing)
+#   - or push a tag such as v1.0.0 yourself; it must match __version__
 on:
   push:
+    branches: [master]
     tags: ["v*"]
 
 permissions:
   contents: write
+
+concurrency:                          # never two releases at once; a queued run waits instead of being cancelled
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -17,19 +25,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: The tag must match the version in the code
+      - name: Decide the tag
+        id: tag
         run: |
-          version=$(python -c "import repoatlas; print(repoatlas.__version__)")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match repoatlas.__version__ ($version). Fix one of them and re-tag." >&2
-            exit 1
+          tag="v$(python -c "import repoatlas; print(repoatlas.__version__)")"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$tag" != "$GITHUB_REF_NAME" ]; then
+              echo "Tag $GITHUB_REF_NAME does not match repoatlas.__version__ (${tag#v}). Fix one of them and re-tag." >&2
+              exit 1
+            fi
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists, nothing to release. Bump __version__ in repoatlas/__init__.py to publish a new one."
+            exit 0
           fi
-      - run: python -m unittest discover -s tests
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - if: steps.tag.outputs.tag
+        run: python -m unittest discover -s tests
       - name: Build the executable
+        if: steps.tag.outputs.tag
         run: |
           python scripts/build_binary.py
+          dist/repoatlas --version
           cd dist && sha256sum repoatlas > repoatlas.sha256
       - name: Publish the release
+        if: steps.tag.outputs.tag
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/repoatlas dist/repoatlas.sha256 --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ steps.tag.outputs.tag }}
+        # --target creates the tag on this commit when it does not exist yet (a version bump pushed to master)
+        run: gh release create "$TAG" dist/repoatlas dist/repoatlas.sha256 --target "$GITHUB_SHA" --title "$TAG" --generate-notes
