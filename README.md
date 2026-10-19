@@ -11,7 +11,7 @@ Point `repoatlas` at a repository and it writes a single HTML page that works li
 macOS, Linux and Windows (WSL). No sudo needed:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/repoatlas/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh
 ```
 
 Then open a **new terminal window** and check it worked:
@@ -28,7 +28,7 @@ That is the whole install. It downloads **one file** into `~/.local/bin` and add
 **From a clone, then delete the clone.** Because `repoatlas` is a single self-contained file, the folder is not needed afterwards:
 
 ```sh
-git clone https://github.com/YOUR_GITHUB_USER/repoatlas.git
+git clone https://github.com/FahimSifnatul/repoatlas.git
 cd repoatlas && ./install.sh
 cd .. && rm -rf repoatlas
 repoatlas --version          # still works
@@ -37,26 +37,26 @@ repoatlas --version          # still works
 **Homebrew**
 
 ```sh
-brew install YOUR_GITHUB_USER/tap/repoatlas
+brew install FahimSifnatul/tap/repoatlas
 ```
 
 **pipx** (the route for Windows without WSL)
 
 ```sh
-pipx install git+https://github.com/YOUR_GITHUB_USER/repoatlas
+pipx install git+https://github.com/FahimSifnatul/repoatlas
 ```
 
 **A specific version, or another folder**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/repoatlas/main/install.sh | REPOATLAS_VERSION=v1.0.0 sh
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/repoatlas/main/install.sh | REPOATLAS_INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | REPOATLAS_VERSION=v1.0.0 sh
+curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | REPOATLAS_INSTALL_DIR=/usr/local/bin sh
 ```
 
 **Update:** run the install command again. **Uninstall:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/repoatlas/main/install.sh | sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh -s -- --uninstall
 ```
 
 **Want to read the installer first?** It is one short file: [install.sh](install.sh). It also checks the download against a published checksum before installing it.

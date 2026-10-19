@@ -4,3 +4,5 @@ build/
 dist/
 *.egg-info/
 repoatlas.html
+.claude/
+.tokensave/

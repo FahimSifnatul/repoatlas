@@ -5,7 +5,7 @@
 There is nothing to install: repoatlas uses only the Python standard library.
 
 ```sh
-git clone https://github.com/YOUR_GITHUB_USER/repoatlas.git && cd repoatlas
+git clone https://github.com/FahimSifnatul/repoatlas.git && cd repoatlas
 python3 -m repoatlas .                          # run it on itself
 python3 -m unittest discover -s tests -v      # run the tests (Python 3.8 to 3.14)
 shellcheck -s sh install.sh scripts/*.sh      # lint the shell scripts, if you touched them

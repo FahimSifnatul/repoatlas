@@ -153,9 +153,9 @@ class Download(Sandbox):
             (d / "repoatlas.sha256").write_text(f"{hashlib.sha256(data).hexdigest()}  repoatlas\n")
         a = repo / "archive" / "refs" / "heads"
         a.mkdir(parents=True)
-        with tarfile.open(a / "main.tar.gz", "w:gz") as t:
+        with tarfile.open(a / "master.tar.gz", "w:gz") as t:
             skip = {"__pycache__", "dist", ".git", "build"}
-            t.add(ROOT, arcname="repoatlas-main", filter=lambda ti: None if (
+            t.add(ROOT, arcname="repoatlas-master", filter=lambda ti: None if (
                 skip & set(ti.name.split("/")) or ti.name.endswith(".egg-info")) else ti)
         server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=str(web)))
         threading.Thread(target=server.serve_forever, daemon=True).start()

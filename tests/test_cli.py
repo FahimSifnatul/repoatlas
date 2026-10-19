@@ -50,6 +50,26 @@ class Cli(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("no source files", r.stderr)
 
+    def test_never_reads_outside_the_repo_through_symlinks(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "secret.txt").write_text("aws_secret_access_key = OUTSIDE-SECRET-VALUE in the credentials file\n")
+            (d / "outside.py").write_text('"""OUTSIDE-DOC-VALUE from a file next to the repo."""\n')
+            repo = d / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "app.py").write_text("def inside():\n    pass\n")
+            (repo / "src" / "same.py").symlink_to("app.py")                  # inside the repo: still mapped
+            (repo / "README.md").symlink_to(d / "secret.txt")
+            (repo / "src" / "leak.py").symlink_to(d / "outside.py")
+            out = d / "map.html"
+            r = run(str(repo), "-o", str(out), "--no-open")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            html = out.read_text()
+            self.assertIn("same.py", html)
+            self.assertNotIn("leak.py", html)
+            self.assertNotIn("OUTSIDE-SECRET-VALUE", html)
+            self.assertNotIn("OUTSIDE-DOC-VALUE", html)
+
 
 if __name__ == "__main__":
     unittest.main()

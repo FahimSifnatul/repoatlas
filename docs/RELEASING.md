@@ -5,25 +5,25 @@
 From the project folder:
 
 ```sh
-scripts/personalize.sh YOUR_GITHUB_USER      # puts your GitHub username into the README, installer, formula...
-git init -b main && git add . && git commit -m "repoatlas 1.0.0"
+scripts/personalize.sh FahimSifnatul      # puts your GitHub username into the README, installer, formula...
+git init -b master && git add . && git commit -m "repoatlas 1.0.0"
 gh repo create repoatlas --public --source=. --push
 #   no gh? create an empty public repo called "repoatlas" on github.com, then:
-#   git remote add origin git@github.com:YOUR_GITHUB_USER/repoatlas.git && git push -u origin main
-git tag v1.0.0 && git push origin v1.0.0
+#   git remote add origin git@github.com:FahimSifnatul/repoatlas.git && git push -u origin master
 ```
 
-Pushing the tag starts the **release** workflow. It checks that the tag matches `repoatlas.__version__`, runs the
-tests, builds the single-file executable, and publishes a GitHub Release with `repoatlas` and `repoatlas.sha256`
-attached. Watch it under the repository's Actions tab.
+Pushing to `master` starts the **release** workflow. When the tag `v` + `repoatlas.__version__` does not exist yet, it
+runs the tests, builds the single-file executable, creates the tag on that commit, and publishes a GitHub Release
+with `repoatlas` and `repoatlas.sha256` attached. Watch it under the repository's Actions tab. Pushing a tag such as
+`v1.0.0` yourself works too; the workflow then checks that it matches `repoatlas.__version__`.
 
 Now the one-line install from the README works for everybody. Until the first release exists, the installer
-falls back to building from the `main` branch, so it works straight after the first push too.
+falls back to building from the `master` branch, so it works straight after the first push too.
 
 Check it as a stranger would, on a machine (or fresh user account) that has never seen the repo:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/repoatlas/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh
 # open a new terminal
 repoatlas --version
 ```
@@ -42,22 +42,22 @@ scripts/update_formula.sh v1.0.0         # writes the tarball URL and its sha256
 **Create the tap, test the formula locally:**
 
 ```sh
-brew tap-new YOUR_GITHUB_USER/tap
-cp packaging/homebrew/Formula/repoatlas.rb "$(brew --repository YOUR_GITHUB_USER/tap)/Formula/"
-brew install --build-from-source YOUR_GITHUB_USER/tap/repoatlas
-brew test YOUR_GITHUB_USER/tap/repoatlas
-brew audit --strict YOUR_GITHUB_USER/tap/repoatlas
+brew tap-new FahimSifnatul/tap
+cp packaging/homebrew/Formula/repoatlas.rb "$(brew --repository FahimSifnatul/tap)/Formula/"
+brew install --build-from-source FahimSifnatul/tap/repoatlas
+brew test FahimSifnatul/tap/repoatlas
+brew audit --strict FahimSifnatul/tap/repoatlas
 ```
 
 **Publish the tap** (the GitHub repository must be named `homebrew-tap`):
 
 ```sh
-cd "$(brew --repository YOUR_GITHUB_USER/tap)"
-git remote add origin git@github.com:YOUR_GITHUB_USER/homebrew-tap.git
+cd "$(brew --repository FahimSifnatul/tap)"
+git remote add origin git@github.com:FahimSifnatul/homebrew-tap.git
 git add . && git commit -m "repoatlas 1.0.0" && git push -u origin main
 ```
 
-Anyone can now run `brew install YOUR_GITHUB_USER/tap/repoatlas`, and `brew upgrade repoatlas` later. The README
+Anyone can now run `brew install FahimSifnatul/tap/repoatlas`, and `brew upgrade repoatlas` later. The README
 already lists this command, so do this step before you advertise the repository.
 
 **How the formula works.** repoatlas only needs Python's standard library, so the formula copies the package into
@@ -75,9 +75,9 @@ licensed and reasonably well known (roughly 75 or more stars). Reviewers prefer 
 
 ## 3. Every later release
 
-1. Change `__version__` in `repoatlas/__init__.py` and commit.
-2. `git tag v1.1.0 && git push origin main v1.1.0` (the workflow publishes the new executable).
-3. `scripts/update_formula.sh v1.1.0`, copy the formula into the tap repository, commit and push.
+1. Change `__version__` in `repoatlas/__init__.py`, commit, and `git push origin master` (the workflow tags `v1.1.0`
+   and publishes the new executable). Pushes that do not change the version release nothing.
+2. `scripts/update_formula.sh v1.1.0`, copy the formula into the tap repository, commit and push.
 
 Everyone who installed with `install.sh` updates by running the same command again.
 
