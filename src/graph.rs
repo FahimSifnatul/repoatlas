@@ -16,6 +16,15 @@ use crate::tables::{cat_of, io_of_cat, io_order, COMMON_METHODS, COMMON_NAMES, I
 /// a definition anywhere in the repo: (file index, definition index)
 pub type Gid = (usize, usize);
 
+/// How sure a resolved call is: Exact (an import or a written-out path proves it), Near (same class, file, folder or
+/// a name only one definition has), Guess (read off the spelling of the object it is called on).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Conf {
+    Exact,
+    Near,
+    Guess,
+}
+
 /// Languages that call into each other's files by the same rules.
 pub fn family(l: &Lang) -> &'static str {
     match l.resolver {
@@ -102,6 +111,12 @@ struct Index<'a> {
     subclasses: HashMap<(&'static str, &'a str), Vec<&'a str>>,
     /// (family, lower-case name) -> class names
     lower: HashMap<(&'static str, String), BTreeSet<&'a str>>,
+    /// file -> its module path: "src/graph" for src/graph.rs, "app" for app/__init__.py
+    modpath: Vec<String>,
+    /// (family, last part of a module path) -> files
+    modfiles: HashMap<(&'static str, String), Vec<usize>>,
+    /// crate name -> its lib.rs
+    crates: HashMap<&'a str, usize>,
     /// file -> the files it reaches through what it imports (built on first use)
     reach: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
 }
@@ -111,11 +126,18 @@ const SUPER: &[&str] = &["super", "parent", "base"];
 const CTORS: &[&str] = &["__init__", "constructor", "initialize", "new", "init"];
 
 impl<'a> Index<'a> {
-    fn new(files: &'a [File]) -> Index<'a> {
+    fn new(files: &'a [File], libs: &'a HashMap<String, String>) -> Index<'a> {
+        let by_path: HashMap<&str, usize> = files.iter().enumerate().map(|(i, f)| (f.path.as_str(), i)).collect();
+        let modpath: Vec<String> = files.iter().map(|f| module_path(&f.path)).collect();
+        let mut modfiles: HashMap<(&'static str, String), Vec<usize>> = HashMap::new();
+        for (i, f) in files.iter().enumerate() {
+            let last = modpath[i].rsplit('/').next().unwrap_or("").to_string();
+            modfiles.entry((family(f.lang), last)).or_default().push(i);
+        }
+        let crates = libs.iter().filter_map(|(n, p)| by_path.get(p.as_str()).map(|&i| (n.as_str(), i))).collect();
         let mut ix = Index {
-            files, by_path: files.iter().enumerate().map(|(i, f)| (f.path.as_str(), i)).collect(), top: HashMap::new(),
-            methods: HashMap::new(), any_method: HashMap::new(), classes: HashMap::new(), subclasses: HashMap::new(),
-            reach: Default::default(), lower: HashMap::new(),
+            files, by_path, top: HashMap::new(), methods: HashMap::new(), any_method: HashMap::new(), classes: HashMap::new(),
+            subclasses: HashMap::new(), reach: Default::default(), lower: HashMap::new(), modpath, modfiles, crates,
         };
         for (fi, f) in files.iter().enumerate() {
             let fam = family(f.lang);
@@ -251,7 +273,174 @@ impl<'a> Index<'a> {
         ks.iter().copied().find(|g| g.0 == fi).or_else(|| ks.iter().copied().find(|g| imported.contains(&g.0))).or(ks.first().copied())
     }
 
-    fn resolve(&self, fi: usize, c: &Call, imported: &HashSet<usize>, folder: &HashSet<usize>, types: &HashMap<String, String>) -> Vec<Gid> {
+    /// `name` as written in file `fi` through an import (`from a import name`, `use a::name`), following re-exports
+    fn via_import(&self, fi: usize, name: &str, depth: usize) -> Vec<Gid> {
+        if depth > 3 {
+            return vec![];
+        }
+        for (local, remote, path) in &self.files[fi].bound_names {
+            if local != name {
+                continue;
+            }
+            if let Some(&j) = self.by_path.get(path.as_str()) {
+                let v = self.defined_in(j, remote, depth + 1);
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// what `name` is in file `j`: a function or class it defines at its top level, else what it re-exports under that name
+    fn defined_in(&self, j: usize, name: &str, depth: usize) -> Vec<Gid> {
+        let fam = family(self.files[j].lang);
+        let mut v: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied()
+            .filter(|g| g.0 == j && self.def(*g).parent == Some(0)).collect();
+        v.sort();
+        match v.first() {
+            Some(g) => vec![self.construct(*g)],
+            None => self.via_import(j, name, depth),
+        }
+    }
+
+    /// `a::b::f()`, `pkg.mod.f()`, `Class::f()`, `fs::File::open()`: follow the path written out.
+    /// Some(empty) = it leads outside the repo or nowhere; None = not a path of modules, try the other rules.
+    fn qualified(&self, fi: usize, recv: &str, name: &str, imported: &HashSet<usize>) -> Option<Vec<Gid>> {
+        static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_$][\w$]*(?:(?:::|\.)[A-Za-z_$][\w$]*)*$").unwrap());
+        if !PATH.is_match(recv) {
+            return None;
+        }
+        let f = &self.files[fi];
+        let fam = family(f.lang);
+        let segs: Vec<&str> = recv.split("::").flat_map(|x| x.split('.')).collect();
+        let root = segs[0];
+        if SELF.contains(&root) || SUPER.contains(&root) {
+            return None;
+        }
+        if f.lang.name == "Rust" && ["std", "core", "alloc"].contains(&root) {
+            return Some(vec![]);
+        }
+        let rooted = ["crate", "self", "super"].contains(&root);
+        let mods: Vec<&str> = segs.iter().copied().skip_while(|x| ["crate", "self", "super"].contains(x)).collect();
+        let bound = f.bound.iter().find(|(a, _)| a == root).and_then(|(_, p)| self.by_path.get(p.as_str()).copied());
+        let seen = |i: usize| {
+            let p = &self.files[i].path;
+            let st = crate::layers::stem(p);
+            st == root || crate::resolve::basename(dirname(p)) == root
+        };
+        let crate_lib = self.crates.get(root).copied().filter(|_| !rooted);
+        let internal = rooted || bound.is_some() || crate_lib.is_some() || f.mods.iter().any(|m| m == root) || imported.iter().any(|&i| seen(i));
+        if !internal {
+            // an imported library (os.path.join, fs::File::open, http.Get): not the repo's
+            return if f.aliases.iter().any(|a| a == root) { Some(vec![]) } else { None };
+        }
+        let last = *segs.last().unwrap();
+        if segs.len() > 1 && self.classes.contains_key(&(fam, last)) {
+            let v = self.method(fam, last, name, false);
+            if !v.is_empty() {
+                return Some(v);
+            }
+            if CTORS.contains(&name) {
+                return self.class_named(fam, last, fi, imported).map(|k| vec![self.construct(k)]);
+            }
+            return Some(vec![]);
+        }
+        let want: Vec<&str> = if crate_lib.is_some() { segs[1..].to_vec() } else { mods };
+        let cands: Vec<usize> = if let Some(b) = bound.filter(|_| segs.len() == 1) {
+            vec![b]
+        } else if want.is_empty() {
+            crate_lib.map(|l| vec![l]).unwrap_or_else(|| vec![fi])
+        } else {
+            let target = want.join("/");
+            let mut v: Vec<usize> = self.modfiles.get(&(fam, want.last().unwrap().to_string())).into_iter().flatten().copied()
+                .filter(|&i| self.modpath[i] == target || self.modpath[i].ends_with(&format!("/{target}"))).collect();
+            v.sort_by_key(|&i| (!imported.contains(&i), self.files[i].path.clone()));
+            v
+        };
+        let hit = cands.iter().map(|&i| self.defined_in(i, name, 0)).find(|v| !v.is_empty());
+        match hit {
+            Some(v) => Some(v),
+            None if segs.len() > 1 => Some(vec![]),
+            None => None,
+        }
+    }
+
+    /// a function handed to another call: `Thread(target=run)`, `app.use(routes)`, `for_each(parse::parse)`
+    fn resolve_ref(&self, fi: usize, c: &Call, imported: &HashSet<usize>, folder: &HashSet<usize>) -> Vec<Gid> {
+        let f = &self.files[fi];
+        let fam = family(f.lang);
+        let name = c.name.as_str();
+        let recv = c.recv.as_str();
+        let here: HashSet<usize> = [fi].into();
+        let one = |v: Vec<Gid>| -> Vec<Gid> {
+            // the nearest file wins; several in one file (overloads) collapse to the first
+            let mut v = v;
+            v.sort_by_key(|g| (g.0 != fi, g.1));
+            v.truncate(1);
+            v
+        };
+        if recv.is_empty() {
+            // a class handed over (`session.get(Item, id)`) runs nothing yet
+            let v: Vec<Gid> = self.via_import(fi, name, 0).into_iter().filter(|g| self.def(*g).kind == Kind::Func).collect();
+            if !v.is_empty() {
+                return v;
+            }
+        } else if SELF.contains(&recv) {
+            // Thread(target=self.run)
+            return self.owner_of(fi, c.def).map(|o| self.method(fam, o, name, true)).unwrap_or_default();
+        } else if let Some(v) = self.qualified(fi, recv, name, imported) {
+            if !v.is_empty() || !f.bound.iter().any(|(a, _)| a == recv) {
+                return v;
+            }
+        }
+        for scope in [&here, imported, folder] {
+            let v = if recv.is_empty() { self.in_files(fam, name, scope, true, fi) } else { vec![] };
+            if !v.is_empty() {
+                return one(v);
+            }
+        }
+        // a module handed over (`app.use(routes)`), or something of one (`items.router`): a function of that
+        // module, else the object its top level builds
+        let module = if recv.is_empty() { name } else { recv };
+        let file = f.bound.iter().find(|(a, _)| a == module).and_then(|(_, p)| self.by_path.get(p.as_str()).copied());
+        if let Some(i) = file {
+            let defined: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| g.0 == i).collect();
+            // the module itself (`items`, a default import), or a name its top level builds with a call
+            let p = &self.files[i].path;
+            let is_module = f.lang.resolver == crate::lang::Resolver::Js || norm(crate::layers::stem(p)) == norm(module)
+                || norm(crate::resolve::basename(dirname(p))) == norm(module);
+            let built = || {
+                let re = Regex::new(&format!(r"(?m)^\s*{}\s*(?::[^=\n]+)?=\s*[\w.]+\s*\(", regex::escape(name))).unwrap();
+                re.is_match(&self.files[i].code)
+            };
+            return match (recv.is_empty(), defined.first()) {
+                (false, Some(g)) if is_module && self.def(*g).kind == Kind::Func => vec![*g],
+                (_, Some(_)) => vec![],           // a class handed over runs nothing yet
+                (false, None) if is_module && i != fi => vec![(i, 0)],
+                (true, None) if i != fi && (is_module || built()) => vec![(i, 0)],
+                _ => vec![],
+            };
+        }
+        if !recv.is_empty() {
+            return vec![];
+        }
+        // a module is a value only in Python and JavaScript; elsewhere `text` handed over is a variable
+        if matches!(f.lang.resolver, Resolver::Python | Resolver::Js) && f.aliases.iter().any(|a| a == name) {
+            let key = norm(name);
+            let hit: Vec<usize> = imported.iter().copied().filter(|&i| {
+                let p = &self.files[i].path;
+                let st = crate::layers::stem(p);
+                norm(st) == key || (["index", "__init__", "mod"].contains(&st) && norm(crate::resolve::basename(dirname(p))) == key)
+            }).collect();
+            if hit.len() == 1 {
+                return vec![(hit[0], 0)];
+            }
+        }
+        vec![]
+    }
+
+    fn resolve(&self, fi: usize, c: &Call, imported: &HashSet<usize>, folder: &HashSet<usize>, types: &HashMap<String, String>) -> (Vec<Gid>, Conf) {
         let f = &self.files[fi];
         let fam = family(f.lang);
         let name = c.name.as_str();
@@ -265,49 +454,7 @@ impl<'a> Index<'a> {
             v
         };
         if c.is_ref {
-            for scope in [&here, imported, folder] {
-                let v = if recv.is_empty() { self.in_files(fam, name, scope, true, fi) } else { vec![] };
-                if !v.is_empty() {
-                    return one(v);
-                }
-            }
-            // a module handed over (`app.use(routes)`), or something of one (`items.router`): a function of that
-            // module, else the object its top level builds
-            let module = if recv.is_empty() { name } else { recv };
-            let file = f.bound.iter().find(|(a, _)| a == module).and_then(|(_, p)| self.by_path.get(p.as_str()).copied());
-            if let Some(i) = file {
-                let defined: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| g.0 == i).collect();
-                // the module itself (`items`, a default import), or a name its top level builds with a call
-                let p = &self.files[i].path;
-                let is_module = f.lang.resolver == crate::lang::Resolver::Js || norm(crate::layers::stem(p)) == norm(module)
-                    || norm(crate::resolve::basename(dirname(p))) == norm(module);
-                let built = || {
-                    let re = Regex::new(&format!(r"(?m)^\s*{}\s*(?::[^=\n]+)?=\s*[\w.]+\s*\(", regex::escape(name))).unwrap();
-                    re.is_match(&self.files[i].code)
-                };
-                return match (recv.is_empty(), defined.first()) {
-                    (false, Some(g)) if is_module && self.def(*g).kind == Kind::Func => vec![*g],
-                    (_, Some(_)) => vec![],           // a class handed over runs nothing yet
-                    (false, None) if is_module && i != fi => vec![(i, 0)],
-                    (true, None) if i != fi && (is_module || built()) => vec![(i, 0)],
-                    _ => vec![],
-                };
-            }
-            if !recv.is_empty() {
-                return vec![];
-            }
-            if f.aliases.iter().any(|a| a == name) {
-                let key = norm(name);
-                let hit: Vec<usize> = imported.iter().copied().filter(|&i| {
-                    let p = &self.files[i].path;
-                    let st = crate::layers::stem(p);
-                    norm(st) == key || (["index", "__init__", "mod"].contains(&st) && norm(crate::resolve::basename(dirname(p))) == key)
-                }).collect();
-                if hit.len() == 1 {
-                    return vec![(hit[0], 0)];
-                }
-            }
-            return vec![];
+            return (self.resolve_ref(fi, c, imported, folder), Conf::Near);
         }
         let owner = self.owner_of(fi, c.def);
         // 1. self.x() / this.x(): the class it is written in (and the classes that override it)
@@ -315,11 +462,11 @@ impl<'a> Index<'a> {
             if let Some(o) = owner {
                 let v = self.method(fam, o, name, true);
                 if !v.is_empty() {
-                    return v;
+                    return (v, Conf::Near);
                 }
             }
             if !recv.is_empty() {
-                return vec![];
+                return (vec![], Conf::Near);
             }
         }
         if SUPER.contains(&recv) || recv.starts_with("super(") {
@@ -328,12 +475,12 @@ impl<'a> Index<'a> {
                     for b in &self.def(*k).bases {
                         let v = self.method(fam, b, name, false);
                         if !v.is_empty() {
-                            return v;
+                            return (v, Conf::Near);
                         }
                     }
                 }
             }
-            return vec![];
+            return (vec![], Conf::Near);
         }
         // 2. Foo.x() / Foo::x() / Foo.new: a known class
         if ident(recv) && self.classes.contains_key(&(fam, recv)) {
@@ -341,20 +488,31 @@ impl<'a> Index<'a> {
             if !v.is_empty() {
                 let mut v = v;
                 v.sort_by_key(|g| g.0 != fi);
-                return v;
+                return (v, Conf::Exact);
             }
             if CTORS.contains(&name) {
                 if let Some(k) = self.class_named(fam, recv, fi, imported) {
-                    return vec![self.construct(k)];
+                    return (vec![self.construct(k)], Conf::Exact);
                 }
             }
-            return vec![]; // Kind::Variant(..), Foo.CONSTANT(): nothing of the repo runs
+            return (vec![], Conf::Exact); // Kind::Variant(..), Foo.CONSTANT(): nothing of the repo runs
+        }
+        // 3. a path written out: `crate::graph::link()`, `os.path.join()`, `fs::File::open()`
+        if let Some(v) = self.qualified(fi, recv, name, imported) {
+            return (v, Conf::Exact);
+        }
+        // 4. a name imported one by one: `from crud import make; make()`
+        if recv.is_empty() && self.in_files(fam, name, &here, false, fi).is_empty() {
+            let v = self.via_import(fi, name, 0);
+            if !v.is_empty() {
+                return (v, Conf::Exact);
+            }
         }
         // `util.helper()`: a module or package the file imports by that name
         let module = !recv.is_empty() && ident(recv) && (f.aliases.iter().any(|a| a == recv)
             || imported.iter().any(|&i| crate::layers::stem(&self.files[i].path) == recv || crate::resolve::basename(dirname(&self.files[i].path)) == recv));
         if recv.is_empty() || module {
-            // 3. the same file, 4. a file it imports (`helper()`, `util.helper()`), 5. the same package
+            // 5. the same file, 6. a file it imports (`helper()`, `util.helper()`), 7. the same package
             let mut scopes = vec![];
             if recv.is_empty() {
                 scopes.push(&here);
@@ -366,37 +524,42 @@ impl<'a> Index<'a> {
             for scope in scopes {
                 let v = self.in_files(fam, name, scope, false, fi);
                 if !v.is_empty() {
-                    return one(v).into_iter().map(|g| self.construct(g)).collect();
+                    return (one(v).into_iter().map(|g| self.construct(g)).collect(), Conf::Near);
                 }
             }
-            // 6. the only definition with that name in the repo, where names need no import
-            if recv.is_empty() && f.lang.scope == Scope::Repo && name.len() >= 3 && !COMMON_NAMES.contains(&name) {
+            // 8. the only definition with that name in the repo, where names need no import (and it is not an imported library's)
+            let imported_lib = f.aliases.iter().any(|a| a == name) && !f.bound.iter().any(|(a, _)| a == name);
+            if recv.is_empty() && f.lang.scope == Scope::Repo && !imported_lib && name.len() >= 3 && !COMMON_NAMES.contains(&name) {
                 let v: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| self.live(*g, fi)).collect();
                 if v.len() == 1 {
-                    return vec![self.construct(v[0])];
+                    return (vec![self.construct(v[0])], Conf::Near);
                 }
             }
             if recv.is_empty() {
-                return vec![];
+                return (vec![], Conf::Near);
             }
         }
-        if !recv.is_empty() && f.text[..c.at].ends_with("::") {
+        if !recv.is_empty() && f.lang.scope == Scope::Repo && f.text[..c.at].ends_with("::") {
             // `module::func()` written out in full: the only top-level function of that name
             if name.len() >= 3 && !COMMON_NAMES.contains(&name) {
                 let v: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| self.def(*g).kind == Kind::Func && self.live(*g, fi)).collect();
                 if v.len() == 1 {
-                    return v;
+                    return (v, Conf::Near);
                 }
             }
         }
-        // 7. x.y() on a variable made from a known class (`p = Parser()`, `const db = new Db()`)
-        if let Some(cls) = types.get(recv) {
+        // 9. x.y() on a variable made from a known class (`p = Parser()`, `const db = new Db()`)
+        // (`self.svc.run()`, `this.repo.find()`: the declared type of that field)
+        let field = recv.rsplit(['.', ':', '>']).next().unwrap_or(recv);
+        let root = recv.split(['.', ':', '-']).next().unwrap_or(recv);
+        let typed = types.get(recv).or_else(|| (field != recv && (SELF.contains(&root) || ident(root))).then(|| types.get(field)).flatten());
+        if let Some(cls) = typed {
             let v = self.method(fam, cls, name, true);
             if !v.is_empty() {
-                return v;
+                return (v, Conf::Near);
             }
         }
-        // 8. x.y() on an object of unknown type: the method of that name, or "one of N" when several classes have it
+        // 10. x.y() on an object of unknown type: the method of that name, or "one of N" when several classes have it
         let word = receiver_word(recv).replace('_', "");
         if word.len() >= 3 {
             let singular = word.strip_suffix('s').unwrap_or(&word).to_string();
@@ -404,18 +567,18 @@ impl<'a> Index<'a> {
             for k in classes {
                 let v = self.method(fam, k, name, true);
                 if !v.is_empty() {
-                    return v;
+                    return (v, Conf::Guess);
                 }
             }
         }
         if COMMON_METHODS.contains(&name) || name.len() < 3 {
-            return vec![];
+            return (vec![], Conf::Guess);
         }
         // only classes the file can see through its imports: `tmp.path()` is not some other module's path()
         let seen = self.reaches(fi);
         let v: Vec<Gid> = self.any_method.get(&(fam, name)).into_iter().flatten().copied().filter(|g| seen.contains(&g.0) && self.live(*g, fi)).collect();
         if !(1..=6).contains(&v.len()) {
-            return vec![];
+            return (vec![], Conf::Guess);
         }
         // and the classes built on them that replace that method
         let mut out: Vec<Gid> = v.iter().flat_map(|g| self.method(fam, self.def(*g).owner.as_deref().unwrap_or(""), name, true)).collect();
@@ -423,7 +586,17 @@ impl<'a> Index<'a> {
         out.sort();
         out.dedup();
         out.truncate(6);
-        out
+        (out, Conf::Guess)
+    }
+}
+
+/// "src/graph.rs" -> "src/graph"; "app/__init__.py" -> "app"; "src/lib.rs" -> "src"
+fn module_path(p: &str) -> String {
+    let stem = p.rsplit_once('.').map(|x| x.0).unwrap_or(p);
+    match stem.rsplit_once('/') {
+        Some((d, last)) if ["index", "__init__", "mod", "lib", "main"].contains(&last) => d.to_string(),
+        None if ["index", "__init__", "mod", "lib", "main"].contains(&stem) => String::new(),
+        _ => stem.to_string(),
     }
 }
 
@@ -463,20 +636,45 @@ fn var_types(f: &File, ix: &Index, fam: &'static str) -> HashMap<String, String>
         }
         out.insert(v, cls.to_string());
     }
+    // declared types: `p: Parser`, `svc: &Service`, `items: Optional[Item]`, `private svc: Service` (name: Type),
+    // `Service svc;` `Parser p,` (Type name), `svc *Service` (Go)
+    static NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\s*\??:\s*(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|\*|Optional\[|Annotated\[|Option<|Box<|Arc<|Rc<)?([A-Z]\w*)\b").unwrap()
+    });
+    static TYPE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z]\w*)(?:<[^<>;(){}]*>)?\s+([a-z_]\w*)\s*[;=,)]").unwrap());
+    static GO_NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)\b([a-z_]\w*)\s+\*?([A-Z]\w*)\s*(?:[,)]|$)").unwrap());
+    let mut declared: Vec<(String, String)> = NAME_TYPE.captures_iter(&f.code).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+    match f.lang.name {
+        "Go" => declared.extend(GO_NAME_TYPE.captures_iter(&f.code).map(|c| (c[1].to_string(), c[2].to_string()))),
+        "Java" | "C#" | "C++" | "Kotlin" | "Scala" | "PHP" => declared.extend(TYPE_NAME.captures_iter(&f.code).map(|c| (c[2].to_string(), c[1].to_string()))),
+        _ => {}
+    }
+    for (v, cls) in declared {
+        if !ix.classes.contains_key(&(fam, cls.as_str())) || bad.contains(&v) {
+            continue;
+        }
+        if out.get(&v).is_some_and(|k| *k != cls) {
+            bad.insert(v.clone());
+            out.remove(&v);
+        } else {
+            out.insert(v, cls);
+        }
+    }
     for v in bad {
         out.remove(&v);
     }
     out
 }
 
-/// For each file, for each of its calls: the definitions it runs (empty = outside the repo).
-pub fn resolve_calls(files: &[File]) -> Vec<Vec<Vec<Gid>>> {
-    let ix = Index::new(files);
+/// For each file, for each of its calls: the definitions it runs (empty = outside the repo), and whether that is
+/// only a guess read off a name. `libs`: crate name -> its lib.rs.
+pub fn resolve_calls(files: &[File], libs: &HashMap<String, String>) -> (Vec<Vec<Vec<Gid>>>, Vec<Vec<bool>>) {
+    let ix = Index::new(files, libs);
     let mut folders: HashMap<(&str, &str), HashSet<usize>> = HashMap::new();
     for (i, f) in files.iter().enumerate() {
         folders.entry((family(f.lang), dirname(&f.path))).or_default().insert(i);
     }
-    files
+    let per_file: Vec<Vec<(Vec<Gid>, Conf)>> = files
         .iter()
         .enumerate()
         .map(|(fi, f)| {
@@ -493,7 +691,10 @@ pub fn resolve_calls(files: &[File]) -> Vec<Vec<Vec<Gid>>> {
             let types = var_types(f, &ix, fam);
             f.calls.iter().map(|c| ix.resolve(fi, c, &imported, &folder, &types)).collect()
         })
-        .collect()
+        .collect();
+    let guess = per_file.iter().map(|v| v.iter().map(|(_, c)| *c == Conf::Guess).collect()).collect();
+    let targets = per_file.into_iter().map(|v| v.into_iter().map(|(t, _)| t).collect()).collect();
+    (targets, guess)
 }
 
 /// What each definition's own body takes in and gives out (nested definitions count for themselves).

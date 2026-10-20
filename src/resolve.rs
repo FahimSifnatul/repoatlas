@@ -13,6 +13,13 @@ use crate::stdlib::PYTHON_STDLIB;
 
 pub type Uses = (BTreeSet<String>, BTreeSet<(String, String)>);
 
+enum RustHit {
+    File(String),
+    Ext(String),
+    Std,
+    None,
+}
+
 pub fn dirname(p: &str) -> &str {
     p.rfind('/').map(|i| &p[..i]).unwrap_or("")
 }
@@ -453,9 +460,8 @@ impl Project {
         }
     }
 
-    fn resolve_rust(&self, f: &File) -> Uses {
-        let (mut uses, mut ext) = (BTreeSet::new(), BTreeSet::new());
-        let path = f.path.as_str();
+    /// the folder a Rust file's `mod` items live in, and the `src` folder `crate::` starts at
+    fn rust_ctx(&self, path: &str) -> (String, String) {
         let d = dirname(path);
         let stem = basename(path).trim_end_matches(".rs");
         let moddir = if ["mod", "lib", "main"].contains(&stem) { d.to_string() } else { join(d, stem) };
@@ -464,6 +470,13 @@ impl Project {
             Some(i) => dparts[..=i].join("/"),
             None => String::new(),
         };
+        (moddir, src)
+    }
+
+    /// `a::b::c` written in a Rust file -> the file of the repo it names, or the outside crate it starts with
+    fn rust_find(&self, f: &File, parts: &[&str]) -> RustHit {
+        let path = f.path.as_str();
+        let (moddir, src) = self.rust_ctx(path);
         let find = |base: &str, rest: &[&str]| -> Option<String> {
             for k in (1..=rest.len()).rev() {
                 let b = join(base, &rest[..k].join("/"));
@@ -475,44 +488,108 @@ impl Project {
             }
             None
         };
+        if parts.is_empty() || ["std", "core", "alloc"].contains(&parts[0]) {
+            return RustHit::Std;
+        }
+        let head = parts[0];
+        let (base, rest): (String, Vec<&str>) = if head == "crate" {
+            (src, parts[1..].to_vec())
+        } else if head == "self" {
+            (moddir, parts[1..].to_vec())
+        } else if head == "super" {
+            let mut base = moddir;
+            let mut ps = parts;
+            while ps.first() == Some(&"super") {
+                base = dirname(&base).to_string();
+                ps = &ps[1..];
+            }
+            (base, ps.to_vec())
+        } else if f.mods.iter().any(|m| m == head) {
+            (moddir, parts.to_vec())
+        } else if let Some(c) = self.rust_crates.get(head) {
+            (join(c, "src"), parts[1..].to_vec())
+        } else {
+            return RustHit::Ext(head.to_string());
+        };
+        match (!rest.is_empty()).then(|| find(&base, &rest)).flatten() {
+            Some(h) => RustHit::File(h),
+            None => RustHit::None,
+        }
+    }
+
+    /// crate name -> its lib.rs, for `my_crate::run()` written out in full
+    pub fn rust_libs(&self) -> HashMap<String, String> {
+        self.rust_crates.iter()
+            .map(|(n, d)| (n.clone(), join(d, "src/lib.rs")))
+            .filter(|(_, p)| self.paths.contains(p))
+            .collect()
+    }
+
+    fn resolve_rust(&self, f: &File) -> Uses {
+        let (mut uses, mut ext) = (BTreeSet::new(), BTreeSet::new());
+        let path = f.path.as_str();
+        let (moddir, _) = self.rust_ctx(path);
         for m in &f.mods {
-            if let Some(h) = find(&moddir, &[m.as_str()]) {
-                uses.insert(h);
+            for c in [format!("{}.rs", join(&moddir, m)), format!("{}/mod.rs", join(&moddir, m))] {
+                if self.paths.contains(&c) && c != path {
+                    uses.insert(c);
+                    break;
+                }
             }
         }
         for u in &f.imports {
             let parts: Vec<&str> = u.split("::").filter(|x| !x.is_empty()).collect();
-            if parts.is_empty() || ["std", "core", "alloc"].contains(&parts[0]) {
-                continue;
-            }
-            let head = parts[0];
-            let (base, rest): (String, Vec<&str>) = if head == "crate" {
-                (src.clone(), parts[1..].to_vec())
-            } else if head == "self" {
-                (moddir.clone(), parts[1..].to_vec())
-            } else if head == "super" {
-                let mut base = moddir.clone();
-                let mut ps = parts.as_slice();
-                while ps.first() == Some(&"super") {
-                    base = dirname(&base).to_string();
-                    ps = &ps[1..];
-                }
-                (base, ps.to_vec())
-            } else if f.mods.iter().any(|m| m == head) {
-                (moddir.clone(), parts.clone())
-            } else if let Some(c) = self.rust_crates.get(head) {
-                (join(c, "src"), parts[1..].to_vec())
-            } else {
-                ext.insert((head.to_string(), head.to_string()));
-                continue;
-            };
-            if !rest.is_empty() {
-                if let Some(h) = find(&base, &rest) {
+            match self.rust_find(f, &parts) {
+                RustHit::File(h) => {
                     uses.insert(h);
                 }
+                RustHit::Ext(head) => {
+                    ext.insert((head.clone(), head));
+                }
+                _ => {}
             }
         }
         (uses, ext)
+    }
+
+    /// Names imported one by one, with the file of the repo each comes from: `from app.crud import make`,
+    /// `import { make } from './crud'`, `use crate::crud::make`.
+    pub fn bind_names(&self, f: &File) -> Vec<(String, String, String)> {
+        f.named.iter().filter_map(|(local, spec, remote)| {
+            let file = match f.lang.resolver {
+                Resolver::Python => self.py_named_file(f, spec, remote),
+                Resolver::Js => self.resolve_js(&f.path, std::slice::from_ref(spec)).0.into_iter().next(),
+                Resolver::Rust => match self.rust_find(f, &spec.split("::").collect::<Vec<_>>()) {
+                    RustHit::File(p) => Some(p),
+                    _ => None,
+                },
+                _ => None,
+            };
+            file.filter(|p| *p != f.path).map(|p| (local.clone(), remote.clone(), p))
+        }).collect()
+    }
+
+    /// `from .x import y`: the file x, unless y is itself a module (then the name stands for a whole file, see `bind`)
+    fn py_named_file(&self, f: &File, spec: &str, remote: &str) -> Option<String> {
+        let level = spec.chars().take_while(|c| *c == '.').count();
+        let module = &spec[level..];
+        let mut parts: Vec<&str> = if module.is_empty() { vec![] } else { module.split('.').collect() };
+        let roots = if level > 0 {
+            let d = dirname(&f.path);
+            let base: Vec<&str> = if d.is_empty() { vec![] } else { d.split('/').collect() };
+            let mut b = base[..base.len().saturating_sub(level - 1)].to_vec();
+            b.extend(parts);
+            parts = b;
+            vec![String::new()]
+        } else {
+            self.py_roots.clone()
+        };
+        let mut sub = parts.clone();
+        sub.push(remote);
+        if self.py_file(&sub, &roots).is_some() {
+            return None;
+        }
+        self.py_file(&parts, &roots)
     }
 
     // ---------------------------------------------------------------- Java / Kotlin

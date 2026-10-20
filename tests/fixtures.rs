@@ -668,3 +668,107 @@ fn cli_never_reads_outside_the_repo_through_symlinks() {
     assert!(!html.contains("OUTSIDE-SECRET-VALUE"));
     assert!(!html.contains("OUTSIDE-DOC-VALUE"));
 }
+
+// ---------------------------------------------------------------- exact call resolution
+
+/// (file, name) of every step
+fn step_files(p: &Value) -> Vec<(String, String)> {
+    p["steps"].as_array().unwrap().iter().map(|s| (s["f"].as_str().unwrap().to_string(), s["n"].as_str().unwrap().to_string())).collect()
+}
+
+#[test]
+fn rust_paths_follow_modules_and_reexports_and_skip_outside_crates() {
+    let d = analyze(&[
+        ("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n"),
+        ("src/main.rs", "use std::fs;\n\nfn open() {}\n\nfn main() {\n    fs::File::open(\"x\");\n    std::fs::File::open(\"y\");\n    demo::analyze();\n}\n"),
+        ("src/lib.rs", "mod atlas;\nmod parse;\npub use atlas::analyze;\n"),
+        ("src/atlas.rs", "use crate::parse;\n\npub fn analyze() {\n    let v = vec![1];\n    v.iter().for_each(parse::parse);\n}\n"),
+        ("src/parse.rs", "pub fn parse(x: &i32) {}\n"),
+    ]);
+    let p = &procs(&d)[0];
+    let got = step_files(p);
+    let names: Vec<&str> = got.iter().map(|x| x.1.as_str()).collect();
+    assert_eq!(names, ["main()", "analyze()", "parse()"], "{got:?}"); // no open(): fs::File::open is the standard library's
+    assert_eq!(got[1].0, "src/atlas.rs"); // through `pub use atlas::analyze` in lib.rs
+    assert_eq!(got[2].0, "src/parse.rs"); // handed over as `parse::parse`
+}
+
+#[test]
+fn python_named_imports_pick_the_exact_function_and_libraries_stay_outside() {
+    let d = analyze(&[
+        ("a/x.py", "def foo():\n    return 1\n"),
+        ("b/x.py", "def foo():\n    return 2\n"),
+        ("util.py", "def join():\n    return 3\n"),
+        ("app.py", "import os\nfrom a.x import foo as bar\nfrom b import x\n\ndef run():\n    os.path.join('a')\n    bar()\n\nif __name__ == '__main__':\n    run()\n"),
+    ]);
+    let p = &procs(&d)[0];
+    let got = step_files(p);
+    assert!(got.contains(&("a/x.py".to_string(), "foo()".to_string())), "{got:?}");
+    assert!(!got.iter().any(|g| g.0 == "b/x.py" || g.1 == "join()"), "{got:?}");
+}
+
+#[test]
+fn a_call_matched_only_by_the_object_name_is_marked_as_a_guess() {
+    let d = analyze(&[
+        ("app.py", "from store import make\n\ndef run(thing):\n    thing.persist()\n\nif __name__ == '__main__':\n    run(make())\n"),
+        ("store.py", "class Box:\n    def persist(self):\n        pass\n\ndef make():\n    return Box()\n"),
+    ]);
+    let p = &procs(&d)[0];
+    let steps = p["steps"].as_array().unwrap();
+    let persist = steps.iter().find(|s| s["n"] == "Box.persist()").expect("a step for Box.persist");
+    assert_eq!(persist["guess"], true);
+    let make = steps.iter().find(|s| s["n"] == "make()").expect("a step for make");
+    assert!(make.get("guess").is_none());
+}
+
+#[test]
+fn what_a_route_hands_over_before_its_handler_is_middleware() {
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"app.js\",\"dependencies\":{\"express\":\"4\"}}"),
+        ("app.js", "const express = require('express');\nconst auth = require('./auth');\nconst svc = require('./svc');\nconst app = express();\napp.get('/items', auth.required, (req, res) => { res.json(svc.list()); });\napp.listen(3000);\n"),
+        ("auth.js", "module.exports = { required: (req, res, next) => next() };\n"),
+        ("svc.js", "function list() { return []; }\nmodule.exports = { list };\n"),
+    ]);
+    let r = &procs(&d)[0]["routes"][0];
+    let s = steps(r);
+    assert_eq!((s[0].1.as_str(), s[0].2.as_str()), ("middleware", "required()"), "{s:?}");
+    assert_eq!(s[1].2, "list()", "{s:?}");
+    assert_eq!(s.len(), 2, "{s:?}");
+}
+
+#[test]
+fn a_declared_type_decides_which_class_a_method_belongs_to() {
+    // two classes have `process`: the parameter's type says which one runs
+    let d = analyze(&[
+        ("app.py", "from jobs import Worker\n\ndef handle(w: Worker):\n    w.process()\n\nif __name__ == '__main__':\n    handle(Worker())\n"),
+        ("jobs.py", "class Worker:\n    def process(self):\n        pass\n\nclass Other:\n    def process(self):\n        pass\n"),
+    ]);
+    let got = steps(&procs(&d)[0]);
+    let names: Vec<&str> = got.iter().map(|s| s.2.as_str()).collect();
+    assert!(names.contains(&"Worker.process()"), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("Other") || n.contains("one of")), "{names:?}");
+}
+
+#[test]
+fn a_constructor_injected_field_gives_its_class() {
+    let d = analyze(&[
+        ("main.ts", "import { Ctl } from './ctl';\nimport { Service } from './svc';\n\nconst c = new Ctl(new Service());\nc.go();\n"),
+        ("ctl.ts", "import { Service } from './svc';\n\nexport class Ctl {\n  constructor(private svc: Service) {}\n  go() { this.svc.runJob(); }\n}\n"),
+        ("svc.ts", "export class Service {\n  runJob() {}\n}\nexport class Other {\n  runJob() {}\n}\n"),
+    ]);
+    let got = steps(&procs(&d)[0]);
+    let names: Vec<&str> = got.iter().map(|s| s.2.as_str()).collect();
+    assert!(names.contains(&"Service.runJob()"), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("Other") || n.contains("one of")), "{names:?}");
+}
+
+#[test]
+fn a_step_says_when_its_call_runs() {
+    let d = analyze(&[
+        ("app.py", "from util import a, b, c, d\n\ndef run(x):\n    d()\n    if x:\n        a()\n    for i in x:\n        b()\n    try:\n        pass\n    except Exception:\n        c()\n\nif __name__ == '__main__':\n    run(1)\n"),
+        ("util.py", "def a(): pass\ndef b(): pass\ndef c(): pass\ndef d(): pass\n"),
+    ]);
+    let p = &procs(&d)[0];
+    let when = |n: &str| p["steps"].as_array().unwrap().iter().find(|s| s["n"] == n).map(|s| s["when"].as_str().unwrap_or("").to_string()).unwrap();
+    assert_eq!((when("a()"), when("b()"), when("c()"), when("d()")), ("if".into(), "loop".into(), "error".into(), "".into()));
+}

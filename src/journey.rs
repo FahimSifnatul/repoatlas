@@ -28,12 +28,18 @@ pub struct Step {
     pub seen: Option<usize>,
     /// calls not shown because the journey goes too deep or too long
     pub more: usize,
+    /// the call that leads here was matched from a name, not proven
+    pub guess: bool,
+    /// what that call sits under in its caller: "if", "loop", "error" or ""
+    pub when: &'static str,
 }
 
 pub struct Ctx<'a> {
     pub files: &'a [File],
     /// per file, per call: the definitions it runs
     pub targets: &'a [Vec<Vec<Gid>>],
+    /// per file, per call: whether the match is only a guess
+    pub guess: &'a [Vec<bool>],
     pub ix: &'a HashMap<String, usize>,
 }
 
@@ -108,7 +114,7 @@ impl<'c, 'a> Walk<'c, 'a> {
                 last.more += 1;
             } else {
                 let file = s.file;
-                self.steps.push(Step { file, def: None, label: String::new(), line: 0, depth: 0, kind: "more", seen: None, more: 1 });
+                self.steps.push(Step { file, def: None, label: String::new(), line: 0, depth: 0, kind: "more", seen: None, more: 1, guess: false, when: "" });
             }
             return false;
         }
@@ -117,16 +123,16 @@ impl<'c, 'a> Walk<'c, 'a> {
     }
 
     /// One step for g, then the steps for what it calls.
-    pub fn visit(&mut self, g: Gid, depth: usize, kind: &'static str) {
+    pub fn visit(&mut self, g: Gid, depth: usize, kind: &'static str, guess: bool, when: &'static str) {
         let ctx = self.ctx;
         let d = &ctx.files[g.0].defs[g.1];
         if let Some(&i) = self.shown.get(&g) {
             let kind = if self.stack.contains(&g) { "recursion" } else { kind };
-            self.push(Step { file: g.0, def: Some(g.1), label: ctx.label(g), line: d.line, depth, kind, seen: Some(i), more: 0 });
+            self.push(Step { file: g.0, def: Some(g.1), label: ctx.label(g), line: d.line, depth, kind, seen: Some(i), more: 0, guess, when });
             return;
         }
         let at = self.steps.len();
-        if !self.push(Step { file: g.0, def: Some(g.1), label: ctx.label(g), line: d.line, depth, kind, seen: None, more: 0 }) {
+        if !self.push(Step { file: g.0, def: Some(g.1), label: ctx.label(g), line: d.line, depth, kind, seen: None, more: 0, guess, when }) {
             return;
         }
         self.shown.insert(g, at);
@@ -139,13 +145,13 @@ impl<'c, 'a> Walk<'c, 'a> {
         self.stack.push(g);
         if defines {
             for h in ctx.defines(g.0) {
-                self.visit(h, depth + 1, "defines");
+                self.visit(h, depth + 1, "defines", false, "");
             }
             // a page: the scripts it loads
             if ctx.files[g.0].lang.grammar.is_none() {
                 for u in &ctx.files[g.0].uses {
                     if let Some(&i) = ctx.ix.get(u).filter(|&&i| ctx.files[i].lang.grammar.is_some()) {
-                        self.visit((i, 0), depth + 1, "loads");
+                        self.visit((i, 0), depth + 1, "loads", false, "");
                     }
                 }
             }
@@ -154,25 +160,32 @@ impl<'c, 'a> Walk<'c, 'a> {
             let c = &ctx.files[g.0].calls[ci];
             let kind = if c.is_ref { "ref" } else { "call" };
             if targets.len() == 1 {
-                self.visit(targets[0], depth + 1, kind);
+                self.visit(targets[0], depth + 1, kind, ctx.guess[g.0][ci], c.cond);
             } else {
                 // x.parse() on an object that can be any of several classes
                 let label = format!("{}() — one of {}", c.name, targets.len());
-                if !self.push(Step { file: g.0, def: None, label, line: c.line, depth: depth + 1, kind: "dispatch", seen: None, more: 0 }) {
+                if !self.push(Step { file: g.0, def: None, label, line: c.line, depth: depth + 1, kind: "dispatch", seen: None, more: 0, guess: true, when: "" }) {
                     break;
                 }
                 for t in targets {
-                    self.visit(*t, depth + 2, "call");
+                    self.visit(*t, depth + 2, "call", ctx.guess[g.0][ci], c.cond);
                 }
             }
         }
         self.stack.pop();
     }
 
+    /// a module run before the code of a request (`auth.optional` handed to a route): one step, no calls
+    pub fn middleware(&mut self, g: Gid) {
+        let ctx = self.ctx;
+        let d = &ctx.files[g.0].defs[g.1];
+        self.push(Step { file: g.0, def: Some(g.1), label: ctx.label(g), line: d.line, depth: 0, kind: "middleware", seen: None, more: 0, guess: false, when: "" });
+    }
+
     /// a file the framework loads by convention: one step, no calls
     pub fn loads(&mut self, file: usize) {
         let label = basename(&self.ctx.files[file].path).to_string();
-        self.push(Step { file, def: Some(0), label, line: 1, depth: 0, kind: "loads", seen: None, more: 0 });
+        self.push(Step { file, def: Some(0), label, line: 1, depth: 0, kind: "loads", seen: None, more: 0, guess: false, when: "" });
     }
 }
 
@@ -214,6 +227,12 @@ pub fn steps_json(ctx: &Ctx, steps: &[Step]) -> Vec<Value> {
             }
             if s.more > 0 {
                 m.insert("more".into(), json!(s.more));
+            }
+            if s.guess {
+                m.insert("guess".into(), json!(true));
+            }
+            if !s.when.is_empty() {
+                m.insert("when".into(), json!(s.when));
             }
             o
         })

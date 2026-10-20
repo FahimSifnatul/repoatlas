@@ -174,6 +174,7 @@ button.part:hover{background:var(--c);color:#fff;border-color:var(--c)}
 .st:first-child{border-top:0}
 .st[hidden]{display:none}
 .st.flash{background:color-mix(in srgb,var(--c) 14%,#fff)}
+.st.guess .sn{text-decoration:underline dashed var(--ink3);text-underline-offset:4px}
 .st .no{font:500 12px/22px var(--mono);color:var(--ink3);text-align:right}
 .st .bd{min-width:0;padding-left:calc(min(var(--d),10)*22px);border-left:0}
 .sl{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;min-height:22px}
@@ -529,13 +530,14 @@ function outline(steps, open, prefix) {
   };
   steps.forEach((s, i) => {
     const n = N[s.f], inner = i + 1 < steps.length && steps[i + 1].d > s.d;
-    const r = el('li', {class:'st k-' + s.k, id:prefix + (i + 1), style:`--c:${n ? colorOf(n) : 'var(--ink3)'};--d:${s.d}`});
+    const r = el('li', {class:'st k-' + s.k + (s.guess ? ' guess' : ''), id:prefix + (i + 1), style:`--c:${n ? colorOf(n) : 'var(--ink3)'};--d:${s.d}`});
     r.tg = inner ? el('button', {class:'tg', 'aria-label':'Show or hide the steps inside', onclick:() => { fold(r, !r.closed); show(); }}, '▸') : el('span', {class:'tg'});
     fold(r, inner && s.d >= open);
-    const tag = {loads:'loaded, not called', dispatch:'depends on the object it is called on', ref:'handed over, runs later'}[s.k];
+    const tag = {loads:'loaded, not called', dispatch:'depends on the object it is called on', ref:'handed over, runs later', middleware:'runs before the handler'}[s.k] || (s.guess ? 'guessed from the name' : null);
     const line = s.k === 'more' ? [r.tg, el('span', {class:'sm'}, `+${num(s.more)} more steps not shown`)]
       : [r.tg, el('button', {class:'sn', title:s.f, onclick:() => go(s.f)}, s.n), el('span', {class:'sw'}, `${s.f.split('/').pop()}:${s.line}`),
          tag ? el('span', {class:'tag'}, tag) : null,
+         s.when ? el('span', {class:'tag'}, {if:'only in some cases', loop:'repeated in a loop', error:'when something fails'}[s.when]) : null,
          s.seen != null ? el('button', {class:'again', onclick:() => jump(s.seen)}, (s.k === 'recursion' ? '↻ calls back into step ' : '↻ same as step ') + (s.seen + 1)) : null,
          ioPills(s.io)];
     r.append(el('span', {class:'no'}, i + 1), el('div', {class:'bd'}, el('div', {class:'sl'}, line),

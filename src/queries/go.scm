@@ -8,3 +8,4 @@
 (argument_list (identifier) @ref)
 (comment) @comment
 [(interpreted_string_literal) (raw_string_literal)] @string
+(argument_list (selector_expression) @ref)

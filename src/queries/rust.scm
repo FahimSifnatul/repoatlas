@@ -10,3 +10,4 @@
 (arguments (identifier) @ref)
 [(line_comment) (block_comment)] @comment
 [(string_literal) (raw_string_literal)] @string
+(arguments (scoped_identifier) @ref)

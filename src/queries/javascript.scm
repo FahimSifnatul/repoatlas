@@ -14,3 +14,4 @@
 ; text that is not code
 (comment) @comment
 [(string) (template_string)] @string
+(arguments (member_expression) @ref)

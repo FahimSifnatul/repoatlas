@@ -96,6 +96,7 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
     for (i, f) in files.iter_mut().enumerate() {
         let (uses, ext) = project.resolve(f);
         f.bound = project.bind(f);
+        f.bound_names = project.bind_names(f);
         let mut u: BTreeSet<String> = uses;
         u.extend(refs[i].iter().cloned());
         u.remove(&f.path);
@@ -109,7 +110,7 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
         f.layer = classify(f, fullstack);
         graph::def_io(f, &[]);
     }
-    let targets = graph::resolve_calls(&files);
+    let (targets, guess) = graph::resolve_calls(&files, &project.rust_libs());
     for (i, f) in files.iter_mut().enumerate() {
         // a call into another file is a link to it, whether or not it was imported by name
         let mut u: BTreeSet<String> = f.uses.iter().cloned().collect();
@@ -666,7 +667,7 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
     }
 
     // ---- journeys: for each process, every step from where it starts to where it ends
-    let ctx = Ctx { files: &files, targets: &targets, ix: &ix };
+    let ctx = Ctx { files: &files, targets: &targets, guess: &guess, ix: &ix };
     let io_label: HashMap<&str, &str> = IO.iter().map(|i| (i.key, i.label)).collect();
     let mut flow = Value::Null;
     if !procs.is_empty() {
@@ -683,7 +684,7 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
                 (fi, di)
             }).collect();
             for &g in &start_defs {
-                walk.visit(g, 0, "start");
+                walk.visit(g, 0, "start", false, "");
             }
             let mut fr = reach(&files, &P.starts);
             fr.extend(P.chain.iter().flat_map(|c| c.targets.iter().cloned()));
@@ -697,13 +698,15 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
             let steps = walk.steps;
             // web endpoints of the files this program loads
             let mut routes = vec![];
-            for p in fr.iter().filter(|p| lay(&files, p) != "tests") {
+            // a shell script that starts something else does not answer its requests
+            let shell_only = P.starts.iter().all(|s| files[ix[s]].lang.name == "Shell");
+            for p in fr.iter().filter(|p| !shell_only && lay(&files, p) != "tests") {
                 let fi = ix[p];
                 let f = &files[fi];
-                let mut found: Vec<(String, String, usize, Vec<Gid>)> = vec![];
+                let mut found: Vec<(String, String, usize, Vec<Gid>, Vec<Gid>)> = vec![];
                 for (di, d) in f.defs.iter().enumerate() {
                     if let Some((verb, path)) = &d.route {
-                        found.push((verb.clone(), path.clone(), d.line, vec![(fi, di)]));
+                        found.push((verb.clone(), path.clone(), d.line, vec![(fi, di)], vec![]));
                     }
                 }
                 for r in &f.routes {
@@ -713,28 +716,59 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
                     // the handler: a function written inline, else the functions handed to the registering call
                     let inline = f.defs.iter().enumerate().find(|(_, d)| d.kind == Kind::Func && d.start >= r.at && d.end <= r.end).map(|(i, _)| (fi, i));
                     let handed: Vec<Gid> = f.calls.iter().enumerate().filter(|(_, c)| c.is_ref && c.at >= r.at && c.end <= r.end).flat_map(|(ci, _)| targets[fi][ci].clone()).collect();
-                    let mut hs = inline.map(|g| vec![g]).unwrap_or(handed);
+                    // what is handed over before the last function runs first (auth, validation): middleware
+                    let mut pre: Vec<Gid> = vec![];
+                    // a function written in place after them (`(req, res) => ...`) is the handler, and has no definition of its own
+                    let anon = f.calls.iter().filter(|c| c.is_ref && c.at >= r.at && c.end <= r.end).map(|c| c.end).max()
+                        .and_then(|e| f.text.get(e..r.end))
+                        .is_some_and(|t| t.contains("=>") || t.contains("function") || t.contains("lambda"));
+                    let mut hs = match inline {
+                        Some(g) => vec![g],
+                        None if anon && r.verb != "ANY" => {
+                            pre = handed;
+                            vec![]
+                        }
+                        None => match handed.iter().rposition(|g| files[g.0].defs[g.1].kind == Kind::Func) {
+                            Some(i) => {
+                                pre = handed[..i].to_vec();
+                                vec![handed[i]]
+                            }
+                            // `get('/x', auth.optional, (req, res) => ...)`: the module is middleware, the calls inside are the handler
+                            None if r.verb != "ANY" => {
+                                pre = handed;
+                                vec![]
+                            }
+                            None => handed,
+                        },
+                    };
                     if hs.is_empty() {
                         // `(req, res) => {...}` written in place: the calls inside it
                         for (ci, c) in f.calls.iter().enumerate() {
                             if c.at > r.at && c.at < r.end && c.def == r.def {
                                 for t in &targets[fi][ci] {
-                                    if !hs.contains(t) {
+                                    if !hs.contains(t) && !pre.contains(t) {
                                         hs.push(*t);
                                     }
                                 }
                             }
                         }
                     }
-                    found.push((r.verb.clone(), r.path.clone(), r.line, hs));
+                    found.push((r.verb.clone(), r.path.clone(), r.line, hs, pre));
                 }
-                for (verb, path, line, hs) in found {
+                for (verb, path, line, hs, pre) in found {
                     if routes.len() >= MAX_ROUTES {
                         break;
                     }
                     let mut w = Walk::new(&ctx, MAX_ROUTE_STEPS);
+                    for g in pre {
+                        if files[g.0].defs[g.1].kind == Kind::Func {
+                            w.visit(g, 0, "middleware", false, "");
+                        } else {
+                            w.middleware(g);
+                        }
+                    }
                     for g in hs {
-                        w.visit(g, 0, "start");
+                        w.visit(g, 0, "start", false, "");
                     }
                     let mut io: BTreeSet<usize> = BTreeSet::new();
                     for s in &w.steps {

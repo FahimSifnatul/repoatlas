@@ -12,4 +12,5 @@
 (expression_statement (string) @doc)
 (string) @string
 ; an object built at the top of another module, handed over: include_router(items.router)
-(argument_list (attribute object: (identifier) attribute: (identifier)) @ref)
+(argument_list (attribute) @ref)
+(keyword_argument value: (attribute) @ref)

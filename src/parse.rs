@@ -55,6 +55,8 @@ pub struct Call {
     pub def: usize,
     /// a function handed to another call (Thread(target=run)), not called right here
     pub is_ref: bool,
+    /// what the call sits under inside its function: "if", "loop", "error", or "" for always
+    pub cond: &'static str,
 }
 
 /// A web endpoint registered by a call: app.get("/users", listUsers), mux.HandleFunc("/x", h)
@@ -110,6 +112,10 @@ pub struct File {
     pub bindings: Vec<(String, String)>,
     /// local names bound to a whole file of the repo (filled once imports are resolved)
     pub bound: Vec<(String, String)>,
+    /// names imported one by one: (local name, module path as written, name in that module)
+    pub named: Vec<(String, String, String)>,
+    /// `named` once the module is a file of the repo: (local name, name in that file, file)
+    pub bound_names: Vec<(String, String, String)>,
     pub pkg: String,
     pub layer: Option<&'static str>,
     pub uses: Vec<String>,
@@ -122,7 +128,7 @@ impl File {
         File {
             path, lang, text, loc, bare: String::new(), code: String::new(), defs: vec![], calls: vec![], routes: vec![],
             symbols: vec![], doc: String::new(), entry: false, imports: vec![], py_imports: vec![], mods: vec![],
-            aliases: vec![], bindings: vec![], bound: vec![], pkg: String::new(), layer: None, uses: vec![], ext: vec![], io: vec![],
+            aliases: vec![], bindings: vec![], bound: vec![], named: vec![], bound_names: vec![], pkg: String::new(), layer: None, uses: vec![], ext: vec![], io: vec![],
         }
     }
 
@@ -250,6 +256,36 @@ fn docstring(node: Node, src: &str) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// What a call sits under inside its own function: a branch, a loop or an error handler (nearest wins).
+/// Read from the names every grammar gives these nodes; the tests of an `if` / `while` always run, so they do not count.
+fn cond_of(node: Node) -> &'static str {
+    let mut at = node;
+    while let Some(p) = at.parent() {
+        let k = p.kind();
+        if k.contains("function") || k.contains("lambda") || k.contains("closure") || k.contains("class") || k == "arrow_function"
+            || k == "method_definition" || k.ends_with("method_declaration") || k.ends_with("constructor_declaration") || k.ends_with("_item")
+        {
+            return "";
+        }
+        let in_test = p.child_by_field_name("condition").is_some_and(|c| c.start_byte() <= node.start_byte() && node.end_byte() <= c.end_byte());
+        if !in_test {
+            if k.contains("catch") || k.contains("except") || k.contains("rescue") {
+                return "error";
+            }
+            if k.starts_with("for") || k.starts_with("while") || k.contains("loop") || k.starts_with("do_") {
+                return "loop";
+            }
+            if k.starts_with("if") || k.contains("conditional") || k.contains("ternary") || k.contains("match") || k.contains("switch")
+                || k.contains("elif") || k.contains("else")
+            {
+                return "if";
+            }
+        }
+        at = p;
+    }
+    ""
 }
 
 /// Where a definition's decorators / annotations start.
@@ -486,7 +522,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 f.routes.push(Route { verb, path: c[1].to_string(), line, at: node.start_byte(), end: node.end_byte(), def });
             }
         }
-        f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), line, def, is_ref: false });
+        f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), line, def, is_ref: false, cond: cond_of(node) });
     }
     for node in refs {
         if seen_calls.contains(&node.start_byte()) {
@@ -494,10 +530,11 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
         }
         let at = node.start_byte();
         let text = &src[node.byte_range()];
-        let (recv, name) = text.rsplit_once('.').unwrap_or(("", text)); // items.router
+        let cut = [text.rfind("::").map(|i| (i, 2)), text.rfind('.').map(|i| (i, 1))].into_iter().flatten().max();
+        let (recv, name) = cut.map(|(i, n)| (&text[..i], &text[i + n..])).unwrap_or(("", text)); // items.router, parse::parse
         f.calls.push(Call {
             name: name.to_string(), recv: recv.to_string(), at, end: node.end_byte(),
-            line: node.start_position().row + 1, def: innermost(at, &f.defs), is_ref: true,
+            line: node.start_position().row + 1, def: innermost(at, &f.defs), is_ref: true, cond: cond_of(node),
         });
     }
     f.calls.sort_by_key(|c| c.at);
@@ -553,6 +590,9 @@ fn imports(f: &mut File) {
                     let ws: Vec<&str> = n.split_whitespace().collect();
                     if let Some(last) = ws.last() {
                         f.aliases.push(last.to_string());
+                        if ws[0] != "*" {
+                            f.named.push((last.to_string(), format!("{}{}", ".".repeat(c[1].len()), &c[2]), ws[0].to_string()));
+                        }
                     }
                 }
             }
@@ -566,6 +606,19 @@ fn imports(f: &mut File) {
             static SPEC: LazyLock<Regex> = LazyLock::new(|| {
                 rx(r#"\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\}\s*)?from\s*['"]([^'"\n]+)['"]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"\n]+)['"]\s*\)"#)
             });
+            static NAMED: LazyLock<Regex> = LazyLock::new(|| {
+                rx(r#"\b(?:import|export)\s+(?:type\s+)?(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}\s*from\s*['"]([^'"\n]+)['"]"#)
+            });
+            for c in NAMED.captures_iter(t) {
+                for item in c[1].split(',') {
+                    let ws: Vec<&str> = item.split_whitespace().filter(|w| *w != "type").collect();
+                    match ws.as_slice() {
+                        [a] => f.named.push((a.to_string(), c[2].to_string(), a.to_string())),
+                        [a, "as", b] => f.named.push((b.to_string(), c[2].to_string(), a.to_string())),
+                        _ => {}
+                    }
+                }
+            }
             f.bindings = SPEC.captures_iter(t)
                 .filter_map(|c| match (c.get(1).or(c.get(3)), c.get(2).or(c.get(4))) {
                     (Some(a), Some(s)) => Some((a.as_str().to_string(), s.as_str().to_string())),
@@ -593,6 +646,7 @@ fn imports(f: &mut File) {
             f.imports = RS_USE.captures_iter(t).map(|c| c[1].trim_matches(':').to_string()).collect();
             f.aliases = f.mods.clone();
             for u in RS_USE_FULL.captures_iter(t) {
+                rust_named(&u[1], &mut f.named);
                 // use crate::graph::{self, Gid} binds graph; use a::b as c binds c
                 for c in RS_BIND.captures_iter(&u[1]) {
                     let name = c.get(3).map(|m| m.as_str()).unwrap_or(&c[1]);
@@ -612,6 +666,33 @@ fn imports(f: &mut File) {
         }
         Resolver::C => f.imports = C_INCLUDE.captures_iter(t).map(|c| c[1].to_string()).collect(),
         Resolver::None => {}
+    }
+}
+
+/// `use a::b::{c, d as e}` / `use a::b::c as d` -> (local, "a::b", remote) for each name
+fn rust_named(spec: &str, out: &mut Vec<(String, String, String)>) {
+    let spec: String = spec.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (prefix, items): (String, Vec<String>) = match spec.split_once('{') {
+        Some((p, rest)) if !rest.contains('{') => (p.trim().trim_end_matches("::").to_string(), rest.trim_end_matches('}').split(',').map(|x| x.trim().to_string()).collect()),
+        Some(_) => return,
+        None => match spec.rsplit_once("::") {
+            Some((p, last)) => (p.to_string(), vec![last.to_string()]),
+            None => return,
+        },
+    };
+    if prefix.is_empty() || ["std", "core", "alloc"].contains(&prefix.split("::").next().unwrap_or("")) {
+        return;
+    }
+    for it in items {
+        let ws: Vec<&str> = it.split_whitespace().collect();
+        let (remote, local) = match ws.as_slice() {
+            [a] => (*a, *a),
+            [a, "as", b] => (*a, *b),
+            _ => continue,
+        };
+        if !["self", "*", "crate", "super"].contains(&remote) && !remote.is_empty() {
+            out.push((local.to_string(), prefix.clone(), remote.to_string()));
+        }
     }
 }
 
