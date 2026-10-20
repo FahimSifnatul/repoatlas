@@ -9,14 +9,16 @@ pub mod journey;
 pub mod lang;
 pub mod launch;
 pub mod layers;
+pub mod mounts;
 pub mod parse;
 pub mod resolve;
 pub mod scan;
+pub mod scip;
 pub mod stdlib;
 pub mod tables;
 pub mod text;
 
-pub use atlas::analyze;
+pub use atlas::{analyze, analyze_with};
 
 /// The map as one self-contained HTML page.
 pub fn render(data: &serde_json::Value, title: &str) -> String {

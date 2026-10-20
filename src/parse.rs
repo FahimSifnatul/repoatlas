@@ -39,6 +39,10 @@ pub struct Def {
     pub sig: String,
     pub doc: String,
     pub route: Option<(String, String)>,
+    /// the object a route is registered on: `router` in `@router.get("/x")`
+    pub route_on: String,
+    /// a class's own route prefix: `@RequestMapping("/users")`, `@Controller('users')`
+    pub prefix: String,
     /// what this definition's own body takes in and gives out (filled by analyze)
     pub io: Vec<&'static str>,
 }
@@ -50,6 +54,8 @@ pub struct Call {
     pub recv: String,
     pub at: usize,
     pub end: usize,
+    /// where the whole expression starts (`Router()` in `Router().use(a)`)
+    pub from: usize,
     pub line: usize,
     /// index of the definition it is written in
     pub def: usize,
@@ -68,6 +74,8 @@ pub struct Route {
     pub at: usize,
     pub end: usize,
     pub def: usize,
+    /// what it is called on: `router` in `router.get("/x", h)`
+    pub recv: String,
 }
 
 #[derive(Clone, Debug)]
@@ -325,6 +333,20 @@ fn decorator_route(head: &str) -> Option<(String, String)> {
     None
 }
 
+/// The object a decorator route is registered on: `@router.get("/x")` -> router, `@app.route(..)` -> app
+fn decorator_recv(head: &str) -> String {
+    static RECV: LazyLock<Regex> = LazyLock::new(|| rx(r"@(?:[\w$]+\.)*([\w$]+)\.(?i:get|post|put|delete|patch|route|head|options|websocket)\("));
+    RECV.captures(head).map(|c| c[1].to_string()).unwrap_or_default()
+}
+
+/// A class-wide route prefix: `@RequestMapping("/api")`, `@Controller('users')`, `@RoutePrefix("api")`
+fn class_prefix(head: &str) -> String {
+    static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+        rx(r#"@(?:RequestMapping|Controller|RoutePrefix|RestController)\(\s*(?:value\s*=\s*|path\s*=\s*)?['"]([^'"]*)['"]"#)
+    });
+    PREFIX.captures(head).map(|c| c[1].to_string()).unwrap_or_default()
+}
+
 /// Strip generics and paths from a captured name: `Foo<T>` -> Foo, `Util::go` -> go
 fn clean_name(s: &str) -> String {
     let s = s.split('<').next().unwrap_or(s);
@@ -337,7 +359,7 @@ pub fn parse(f: &mut File) {
     let base = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     f.defs.push(Def {
         name: base, kind: Kind::Module, start: 0, end: f.text.len(), line: 1, parent: None, owner: None, bases: vec![],
-        sig: String::new(), doc: String::new(), route: None, io: vec![],
+        sig: String::new(), doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![],
     });
     match key.and_then(|k| lang::GRAMMARS.get(k)) {
         Some(g) => parse_tree(f, &src, g),
@@ -413,6 +435,8 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     sig: if kind == Kind::Func { signature(src, name.end_byte(), true) } else { String::new() },
                     doc: if docstrings { docstring(node, src) } else { String::new() },
                     route,
+                    route_on: if kind == Kind::Func { decorator_recv(&src[head..name.start_byte()]) } else { String::new() },
+                    prefix: if kind == Kind::Class { class_prefix(&src[head..name.start_byte()]) } else { String::new() },
                     io: vec![],
                 });
                 // a decorated / annotated definition is described from its first decorator line
@@ -433,7 +457,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     defs.push(Def {
                         name: first, kind: Kind::Main, start: node.start_byte(), end: node.end_byte(),
                         line: node.start_position().row + 1, parent: None, owner: None, bases: vec![], sig: String::new(),
-                        doc: String::new(), route: None, io: vec![],
+                        doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![],
                     });
                 }
             }
@@ -519,10 +543,10 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
             if let Some(c) = FIRST.captures(&src[callee.end_byte()..node.end_byte()]) {
                 let verb = if name.len() <= 6 && name != "handle" && name != "route" { name.to_uppercase() } else { "ANY".into() };
                 let verb = if verb == "ALL" { "ANY".into() } else { verb };
-                f.routes.push(Route { verb, path: c[1].to_string(), line, at: node.start_byte(), end: node.end_byte(), def });
+                f.routes.push(Route { verb, path: c[1].to_string(), line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string() });
             }
         }
-        f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), line, def, is_ref: false, cond: cond_of(node) });
+        f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(), line, def, is_ref: false, cond: cond_of(node) });
     }
     for node in refs {
         if seen_calls.contains(&node.start_byte()) {
@@ -533,7 +557,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
         let cut = [text.rfind("::").map(|i| (i, 2)), text.rfind('.').map(|i| (i, 1))].into_iter().flatten().max();
         let (recv, name) = cut.map(|(i, n)| (&text[..i], &text[i + n..])).unwrap_or(("", text)); // items.router, parse::parse
         f.calls.push(Call {
-            name: name.to_string(), recv: recv.to_string(), at, end: node.end_byte(),
+            name: name.to_string(), recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(),
             line: node.start_position().row + 1, def: innermost(at, &f.defs), is_ref: true, cond: cond_of(node),
         });
     }

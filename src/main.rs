@@ -23,6 +23,9 @@ struct Args {
     /// do not open the result in a browser
     #[arg(long)]
     no_open: bool,
+    /// a SCIP index (default: index.scip in the repository, when there is one) for exact call matching
+    #[arg(long, value_name = "FILE")]
+    scip: Option<PathBuf>,
 }
 
 fn fail(msg: &str) -> ExitCode {
@@ -72,7 +75,7 @@ fn main() -> ExitCode {
         match Command::new("git").args(["clone", "--depth", "1", "--quiet", &a.repo]).arg(tmp.path()).status() {
             Err(_) => return fail("git is not installed, so repoatlas cannot clone a URL. Clone it yourself and pass the folder."),
             Ok(s) if !s.success() => return fail(&format!("could not clone {}", a.repo)),
-            Ok(_) => repoatlas::analyze(tmp.path(), &name),
+            Ok(_) => repoatlas::analyze_with(tmp.path(), &name, a.scip.as_deref()),
         }
     } else {
         let root = expand(&a.repo);
@@ -80,7 +83,7 @@ fn main() -> ExitCode {
             return fail(&format!("'{}' is not a folder", a.repo));
         };
         let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "repo".into());
-        repoatlas::analyze(&root, &name)
+        repoatlas::analyze_with(&root, &name, a.scip.as_deref())
     };
     let data = match result {
         Ok(d) => d,
@@ -92,6 +95,9 @@ fn main() -> ExitCode {
     }
     let loc = repoatlas::text::thousands(r["loc"].as_u64().unwrap_or(0) as usize);
     println!("Scanned {} files ({loc} lines): {} layers, {} parts.\nWrote {}", r["files"], data["layers"].as_array().map_or(0, |l| l.len()), r["parts"], out.display());
+    if let Some(s) = r["scip"].as_object() {
+        println!("SCIP index: {} of its files, {} calls matched exactly.", s["documents"], s["calls"]);
+    }
     if !a.no_open {
         open(&out);
     }

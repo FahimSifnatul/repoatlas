@@ -83,7 +83,12 @@ fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Map a repository; `index.scip` in it (or the file given) sharpens which definition each call runs.
 pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
+    analyze_with(root, name, None)
+}
+
+pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Value, String> {
     let (mut files, man) = crate::scan::scan(root);
     if files.is_empty() {
         return Err(format!("no source files found in {}", root.display()));
@@ -110,7 +115,13 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
         f.layer = classify(f, fullstack);
         graph::def_io(f, &[]);
     }
-    let (targets, guess) = graph::resolve_calls(&files, &project.rust_libs());
+    let known: HashSet<String> = paths.iter().cloned().collect();
+    let scip_index = match scip {
+        Some(p) => Some(crate::scip::Scip::load(p, &known)?),
+        None => Some(root.join("index.scip")).filter(|p| p.is_file()).and_then(|p| crate::scip::Scip::load(&p, &known).ok()),
+    };
+    let (targets, guess, scip_hits) = graph::resolve_calls(&mut files, &project.rust_libs(), scip_index.as_ref());
+    let mounts = crate::mounts::build(&files);
     for (i, f) in files.iter_mut().enumerate() {
         // a call into another file is a link to it, whether or not it was imported by name
         let mut u: BTreeSet<String> = f.uses.iter().cloned().collect();
@@ -704,9 +715,15 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
                 let fi = ix[p];
                 let f = &files[fi];
                 let mut found: Vec<(String, String, usize, Vec<Gid>, Vec<Gid>)> = vec![];
-                for (di, d) in f.defs.iter().enumerate() {
+                // the full path: the prefixes of the routers it is mounted under, the class it is written in, then its own
+                let full = |recv: &str, class: &str, path: &str| -> String {
+                    let up = mounts.prefix(fi, recv);
+                    if up.is_empty() && class.is_empty() { path.to_string() } else { crate::mounts::join_path(&[&up, class, path]) }
+                };
+                for (di, d) in f.defs.iter().enumerate().filter(|(_, d)| d.kind == Kind::Func) {
                     if let Some((verb, path)) = &d.route {
-                        found.push((verb.clone(), path.clone(), d.line, vec![(fi, di)], vec![]));
+                        let class = d.parent.map(|p| f.defs[p].prefix.as_str()).unwrap_or("");
+                        found.push((verb.clone(), full(&d.route_on, class, path), d.line, vec![(fi, di)], vec![]));
                     }
                 }
                 for r in &f.routes {
@@ -753,7 +770,7 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
                             }
                         }
                     }
-                    found.push((r.verb.clone(), r.path.clone(), r.line, hs, pre));
+                    found.push((r.verb.clone(), full(&r.recv, "", &r.path), r.line, hs, pre));
                 }
                 for (verb, path, line, hs, pre) in found {
                     if routes.len() >= MAX_ROUTES {
@@ -966,6 +983,7 @@ pub fn analyze(root: &Path, name: &str) -> Result<Value, String> {
         "libs": libs, "entries": entries, "generated": today(),
         "runs": if entry_kind == "Entry points" { procs.iter().map(|P| P.name.clone()).collect::<Vec<_>>() } else { vec![] },
         "colors": colors,
+        "scip": scip_index.as_ref().map(|s| json!({"documents": s.documents(), "calls": scip_hits})),
     });
     let nodes_json: Map<String, Value> = nodes.into_iter().map(|(id, n)| (id, n.to_json(&files, &ix))).collect();
     let io: Map<String, Value> = IO.iter().map(|i| (i.key.to_string(), json!([i.label, i.way]))).collect();

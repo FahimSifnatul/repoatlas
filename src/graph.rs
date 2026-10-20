@@ -600,6 +600,82 @@ fn module_path(p: &str) -> String {
     }
 }
 
+/// What the SCIP index says about one call.
+enum Verdict {
+    /// the definitions it runs
+    Defs(Vec<Gid>),
+    /// defined outside the repo (or nowhere the index knows)
+    Outside,
+}
+
+/// A SCIP index joined to the files of the repo: byte offsets of every line, for matching positions.
+struct ScipView<'a> {
+    scip: &'a crate::scip::Scip,
+    lines: Vec<Vec<usize>>,
+}
+
+impl<'a> ScipView<'a> {
+    fn new(scip: &'a crate::scip::Scip, files: &[File]) -> ScipView<'a> {
+        let lines = files.iter().map(|f| std::iter::once(0).chain(f.text.bytes().enumerate().filter(|(_, b)| *b == b'\n').map(|(i, _)| i + 1)).collect()).collect();
+        ScipView { scip, lines }
+    }
+
+    fn line_text<'t>(&self, f: &'t File, fi: usize, line: usize) -> Option<(usize, &'t str)> {
+        let ls = &self.lines[fi];
+        let a = *ls.get(line)?;
+        let b = ls.get(line + 1).copied().unwrap_or(f.text.len());
+        Some((a, f.text.get(a..b)?.trim_end_matches(['\n', '\r'])))
+    }
+
+    /// the definition of ours that a definition of the index is
+    fn def_gid(&self, ix: &Index, d: &crate::scip::DefLoc) -> Option<Gid> {
+        let fi = *ix.by_path.get(self.scip.path_name(d.path))?;
+        let f = &ix.files[fi];
+        let (start, text) = self.line_text(f, fi, d.line as usize)?;
+        let (a, b) = self.scip.name_bytes(d, text)?;
+        let (a, b) = (start + a, start + b);
+        let name = f.text.get(a..b)?;
+        f.defs.iter().enumerate().skip(1)
+            .filter(|(_, x)| matches!(x.kind, Kind::Func | Kind::Class | Kind::Type) && x.name == name && x.start <= a && a < x.end)
+            .min_by_key(|(_, x)| x.end - x.start)
+            .map(|(i, _)| (fi, i))
+    }
+
+    fn verdict(&self, ix: &Index, fi: usize, c: &Call) -> Option<Verdict> {
+        let f = &ix.files[fi];
+        // a call is at its callee name; a function handed over ends with its name
+        let p = if c.is_ref { c.end.checked_sub(c.name.len())? } else { c.at };
+        let line = self.lines[fi].partition_point(|&s| s <= p).checked_sub(1)?;
+        let (start, text) = self.line_text(f, fi, line)?;
+        let sym = self.scip.symbol_at(&f.path, line as u32, text, p - start)?;
+        // a call on an interface can run any of its implementations
+        let syms: Vec<u32> = std::iter::once(sym).chain(self.scip.implementors(sym).iter().copied().take(6)).collect();
+        let mut out: Vec<Gid> = vec![];
+        let mut unmapped = false;
+        for s in syms {
+            for d in self.scip.defs_of(s) {
+                match self.def_gid(ix, d) {
+                    Some(g) => {
+                        let g = ix.construct(g);
+                        if !out.contains(&g) {
+                            out.push(g);
+                        }
+                    }
+                    None => unmapped = true,
+                }
+            }
+        }
+        out.truncate(6);
+        if !out.is_empty() {
+            Some(Verdict::Defs(out))
+        } else if unmapped {
+            None // defined in the repo as something repoatlas does not model: its own answer stands
+        } else {
+            Some(Verdict::Outside)
+        }
+    }
+}
+
 /// `self.project`, `plugins[f["lang"]]` -> project, plugins
 fn receiver_word(recv: &str) -> String {
     static BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\[\]]*\]|\([^()]*\)").unwrap());
@@ -666,35 +742,123 @@ fn var_types(f: &File, ix: &Index, fam: &'static str) -> HashMap<String, String>
     out
 }
 
-/// For each file, for each of its calls: the definitions it runs (empty = outside the repo), and whether that is
-/// only a guess read off a name. `libs`: crate name -> its lib.rs.
-pub fn resolve_calls(files: &[File], libs: &HashMap<String, String>) -> (Vec<Vec<Vec<Gid>>>, Vec<Vec<bool>>) {
-    let ix = Index::new(files, libs);
-    let mut folders: HashMap<(&str, &str), HashSet<usize>> = HashMap::new();
-    for (i, f) in files.iter().enumerate() {
-        folders.entry((family(f.lang), dirname(&f.path))).or_default().insert(i);
-    }
-    let per_file: Vec<Vec<(Vec<Gid>, Conf)>> = files
-        .iter()
-        .enumerate()
-        .map(|(fi, f)| {
-            let fam = family(f.lang);
-            let mut imported: HashSet<usize> = f.uses.iter().filter_map(|u| ix.by_path.get(u.as_str()).copied()).collect();
-            if f.lang.scope == Scope::Folder {
-                // an imported package is every file of its folder
-                let more: Vec<usize> = imported.iter().flat_map(|&i| folders.get(&(fam, dirname(&files[i].path))).into_iter().flatten().copied()).collect();
-                imported.extend(more);
+/// Functions a signature names through a module-level alias: `SessionDep = Annotated[Session, Depends(get_db)]`
+/// at the top of a file, `def read(session: SessionDep)` anywhere. Calling `read` then runs `get_db` first; each
+/// function comes back as a call placed in the signature: (file, call, what it runs).
+fn alias_calls(files: &[File], per_file: &[Vec<(Vec<Gid>, Conf)>]) -> Vec<(usize, Call, Vec<Gid>)> {
+    static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?m)^(?:export\s+)?(?:(?:const|let|var)\s+)?([A-Za-z_]\w*)\s*(?::[^=\n]+)?=[^\n]*").unwrap()
+    });
+    static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z_]\w*").unwrap());
+    let mut aliases: HashMap<(usize, String), Vec<Gid>> = HashMap::new();
+    for (fi, f) in files.iter().enumerate() {
+        for c in ASSIGN.captures_iter(&f.bare) {
+            let whole = c.get(0).unwrap();
+            let gids: Vec<Gid> = f.calls.iter().enumerate()
+                .filter(|(_, k)| k.is_ref && k.def == 0 && k.at >= whole.start() && k.at < whole.end())
+                .flat_map(|(ci, _)| per_file[fi][ci].0.iter().copied())
+                .filter(|g| files[g.0].defs[g.1].kind == Kind::Func)
+                .collect();
+            if !gids.is_empty() {
+                aliases.insert((fi, c[1].to_string()), gids);
             }
-            imported.remove(&fi);
-            let mut folder = if f.lang.scope != Scope::Imports { folders.get(&(fam, dirname(&f.path))).cloned().unwrap_or_default() } else { HashSet::new() };
-            folder.remove(&fi);
-            let types = var_types(f, &ix, fam);
-            f.calls.iter().map(|c| ix.resolve(fi, c, &imported, &folder, &types)).collect()
-        })
-        .collect();
+        }
+    }
+    if aliases.is_empty() {
+        return vec![];
+    }
+    let by_path: HashMap<&str, usize> = files.iter().enumerate().map(|(i, f)| (f.path.as_str(), i)).collect();
+    let mut out = vec![];
+    for (fi, f) in files.iter().enumerate() {
+        for (di, d) in f.defs.iter().enumerate().skip(1).filter(|(_, d)| d.kind == Kind::Func) {
+            // the part of the definition before its body: up to `):`, `) ->` or `{`
+            let head = crate::text::slice(&f.code, d.start, d.end.min(d.start + 800));
+            let cut = ["):", ") ->", ") {", "{"].iter().filter_map(|m| head.find(m).map(|i| i + m.len())).min().unwrap_or(head.len().min(300));
+            let head = &head[..cut.min(head.len())];
+            let mut seen = HashSet::new();
+            for w in WORD.find_iter(head) {
+                let name = w.as_str();
+                if name == d.name || !seen.insert(name) {
+                    continue;
+                }
+                let key = if aliases.contains_key(&(fi, name.to_string())) {
+                    Some((fi, name.to_string()))
+                } else {
+                    f.bound_names.iter().find(|(l, ..)| l == name).and_then(|(_, r, p)| by_path.get(p.as_str()).map(|&j| (j, r.clone())))
+                };
+                let Some(gs) = key.and_then(|k| aliases.get(&k)) else { continue };
+                let at = d.start + w.start();
+                for g in gs {
+                    let call = Call {
+                        name: files[g.0].defs[g.1].name.clone(), recv: String::new(), at, end: d.start + w.end(), from: at,
+                        line: crate::text::line_of(&f.text, at), def: di, is_ref: true, cond: "",
+                    };
+                    out.push((fi, call, vec![*g]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// For each file, for each of its calls: the definitions it runs (empty = outside the repo), and whether that is
+/// only a guess read off a name. `libs`: crate name -> its lib.rs. Calls a signature hides behind an alias are added
+/// to the files (kept in source order).
+pub fn resolve_calls(files: &mut [File], libs: &HashMap<String, String>, scip: Option<&crate::scip::Scip>) -> (Vec<Vec<Vec<Gid>>>, Vec<Vec<bool>>, usize) {
+    let hits = std::cell::Cell::new(0usize);
+    let mut per_file: Vec<Vec<(Vec<Gid>, Conf)>> = {
+        let files: &[File] = files;
+        let ix = Index::new(files, libs);
+        let view = scip.map(|s| ScipView::new(s, files));
+        let mut folders: HashMap<(&str, &str), HashSet<usize>> = HashMap::new();
+        for (i, f) in files.iter().enumerate() {
+            folders.entry((family(f.lang), dirname(&f.path))).or_default().insert(i);
+        }
+        files
+            .iter()
+            .enumerate()
+            .map(|(fi, f)| {
+                let fam = family(f.lang);
+                let mut imported: HashSet<usize> = f.uses.iter().filter_map(|u| ix.by_path.get(u.as_str()).copied()).collect();
+                if f.lang.scope == Scope::Folder {
+                    // an imported package is every file of its folder
+                    let more: Vec<usize> = imported.iter().flat_map(|&i| folders.get(&(fam, dirname(&files[i].path))).into_iter().flatten().copied()).collect();
+                    imported.extend(more);
+                }
+                imported.remove(&fi);
+                let mut folder = if f.lang.scope != Scope::Imports { folders.get(&(fam, dirname(&f.path))).cloned().unwrap_or_default() } else { HashSet::new() };
+                folder.remove(&fi);
+                let types = var_types(f, &ix, fam);
+                f.calls.iter().map(|c| {
+                    let ours = ix.resolve(fi, c, &imported, &folder, &types);
+                    // the index knows better: what it names is used, and an outside library beats a guess from a name
+                    match view.as_ref().and_then(|v| v.verdict(&ix, fi, c)) {
+                        Some(Verdict::Defs(t)) => {
+                            hits.set(hits.get() + 1);
+                            (t, Conf::Exact)
+                        }
+                        Some(Verdict::Outside) if ours.1 == Conf::Guess || ours.0.is_empty() => {
+                            hits.set(hits.get() + 1);
+                            (vec![], Conf::Exact)
+                        }
+                        _ => ours,
+                    }
+                }).collect()
+            })
+            .collect()
+    };
+    let mut extra: Vec<(usize, Call, Vec<Gid>)> = alias_calls(files, &per_file);
+    extra.sort_by_key(|(fi, c, _)| (*fi, c.at));
+    for (fi, call, targets) in extra {
+        let f = &mut files[fi];
+        // keep the calls in source order: the signature comes before the body
+        let at = f.calls.partition_point(|c| c.at <= call.at);
+        f.calls.insert(at, call);
+        per_file[fi].insert(at, (targets, Conf::Exact));
+    }
     let guess = per_file.iter().map(|v| v.iter().map(|(_, c)| *c == Conf::Guess).collect()).collect();
     let targets = per_file.into_iter().map(|v| v.into_iter().map(|(t, _)| t).collect()).collect();
-    (targets, guess)
+    (targets, guess, hits.get())
 }
 
 /// What each definition's own body takes in and gives out (nested definitions count for themselves).

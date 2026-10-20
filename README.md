@@ -84,6 +84,8 @@ It writes `repoatlas.html` and opens it in your browser. The file is self-contai
 
 ![How it runs](docs/flow.png)
 
+Web endpoints show their **full path**: the prefix of every router they are mounted under is joined in (`app.include_router(items.router, prefix=settings.API_V1_STR)`, `app.use('/api', routes)`, `r.Group("/v1")`, a controller class's `@RequestMapping("/users")`). A prefix kept in a constant is looked up; when the project does not give it one value, it is shown by name, as `{API_V1_STR}`. What runs before the handler is listed first: middleware handed to the route, and functions a signature names through an alias (`SessionDep = Annotated[Session, Depends(get_db)]`, then `def read(session: SessionDep)`).
+
 Every box is clickable. The breadcrumb, your browser's Back button and the `Esc` key all take you up a level.
 
 A finished example is in [docs/example.html](docs/example.html): download it and open it in a browser.
@@ -114,6 +116,21 @@ repoatlas has no built-in knowledge of any framework. It works out how a project
 * **The framework itself.** Named from the libraries the code imports and the project's dependency files.
 
 Missing yours? A language is a tree-sitter grammar, one small query file and one table entry, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Sharper matching with a SCIP index (optional)
+
+repoatlas works out which function a call runs with its own rules, and shows the calls it had to guess. If you want compiler-grade answers, give it a [SCIP](https://github.com/scip-code/scip) index. Each language has an indexer that writes one `index.scip` file in a single run:
+
+```sh
+rust-analyzer scip .          # Rust
+scip-python index .           # Python
+scip-typescript index         # TypeScript / JavaScript
+scip-java index               # Java, Kotlin, Scala
+scip-go                       # Go
+repoatlas . --scip index.scip # or just leave index.scip in the repository: it is picked up by itself
+```
+
+Where the index names the definition of a call, that definition is used (and a call on an interface runs every implementation the index lists, up to six). A call the index places in an outside library replaces a guess made from a name. Everything the index does not cover keeps the normal rules, so a partial index is safe, but a repo it only half covers may lose a guessed edge it should keep, so index the whole project. Nothing is run or uploaded: repoatlas only reads the file.
 
 ## Good to know
 

@@ -772,3 +772,166 @@ fn a_step_says_when_its_call_runs() {
     let when = |n: &str| p["steps"].as_array().unwrap().iter().find(|s| s["n"] == n).map(|s| s["when"].as_str().unwrap_or("").to_string()).unwrap();
     assert_eq!((when("a()"), when("b()"), when("c()"), when("d()")), ("if".into(), "loop".into(), "error".into(), "".into()));
 }
+
+// ---------------------------------------------------------------- route prefixes
+
+fn route_paths(p: &Value) -> Vec<String> {
+    sorted(p["routes"].as_array().unwrap().iter().map(|r| format!("{} {}", r["verb"].as_str().unwrap(), r["path"].as_str().unwrap())).collect())
+}
+
+#[test]
+fn a_routers_prefixes_are_joined_with_the_constant_they_name() {
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"app.main:app\"]\n"),
+        ("app/__init__.py", ""),
+        ("app/config.py", "class Settings:\n    API_V1_STR: str = \"/api/v1\"\n\nsettings = Settings()\n"),
+        ("app/main.py", "from fastapi import FastAPI\nfrom app.config import settings\nfrom app.api.main import api_router\n\napp = FastAPI()\napp.include_router(api_router, prefix=settings.API_V1_STR)\n"),
+        ("app/api/__init__.py", ""),
+        ("app/api/main.py", "from fastapi import APIRouter\nfrom app.api.routes import items\n\napi_router = APIRouter()\napi_router.include_router(items.router)\n"),
+        ("app/api/routes/__init__.py", ""),
+        ("app/api/routes/items.py", "from fastapi import APIRouter\n\nrouter = APIRouter(prefix=\"/items\", tags=[\"items\"])\n\n@router.get(\"/\")\ndef read_items():\n    return []\n\n@router.get(\"/{id}\")\ndef read_item(id):\n    return id\n"),
+    ]);
+    let p = &procs(&d)[0];
+    assert_eq!(route_paths(p), ["GET /api/v1/items/", "GET /api/v1/items/{id}"]);
+}
+
+#[test]
+fn an_unknown_prefix_constant_is_shown_by_name() {
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"app:app\"]\n"),
+        ("app.py", "from fastapi import FastAPI\nfrom items import router\n\napp = FastAPI()\napp.include_router(router, prefix=BASE)\n"),
+        ("items.py", "from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get(\"/x\")\ndef x():\n    return 1\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /{BASE}/x"]);
+}
+
+#[test]
+fn express_mounts_put_their_path_in_front() {
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"main.js\",\"dependencies\":{\"express\":\"4\"}}"),
+        ("main.js", "const express = require('express');\nconst routes = require('./routes');\nconst app = express();\napp.use('/api', routes);\napp.listen(3000);\n"),
+        ("routes.js", "const router = require('express').Router();\nconst users = require('./users');\nrouter.use('/users', users);\nmodule.exports = router;\n"),
+        ("users.js", "const router = require('express').Router();\nrouter.get('/:id', (req, res) => { res.json({}); });\nmodule.exports = router;\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/users/:id"]);
+}
+
+#[test]
+fn a_controller_class_prefix_comes_before_its_methods() {
+    let d = analyze(&[
+        ("src/main/java/app/Main.java", "package app;\n\npublic class Main {\n    public static void main(String[] a) {}\n}\n"),
+        ("src/main/java/app/UserController.java", "package app;\n\n@RestController\n@RequestMapping(\"/users\")\npublic class UserController {\n    @GetMapping(\"/{id}\")\n    public String get() { return \"\"; }\n}\n"),
+    ]);
+    let all: Vec<String> = procs(&d).iter().flat_map(route_paths).collect();
+    assert!(all.contains(&"GET /users/{id}".to_string()), "{all:?}");
+}
+
+#[test]
+fn a_chained_router_takes_the_name_it_is_given() {
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"main.js\",\"dependencies\":{\"express\":\"4\"}}"),
+        ("main.js", "const express = require('express');\nconst routes = require('./routes');\nconst app = express();\napp.use(routes);\napp.listen(3000);\n"),
+        ("routes.js", "const { Router } = require('express');\nconst tags = require('./tags');\nconst api = Router()\n  .use(tags);\n\nmodule.exports = Router().use('/api', api);\n"),
+        ("tags.js", "const router = require('express').Router();\nrouter.get('/tags', (req, res) => { res.json([]); });\nmodule.exports = router;\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/tags"]);
+}
+
+#[test]
+fn a_signature_alias_runs_the_functions_it_hands_over() {
+    let d = analyze(&[
+        ("deps.py", "from typing import Annotated\nfrom fastapi import Depends\n\ndef get_db():\n    return 1\n\nSessionDep = Annotated[object, Depends(get_db)]\n"),
+        ("routes.py", "from deps import SessionDep\n\ndef read(session: SessionDep):\n    return 1\n"),
+        ("main.py", "from routes import read\n\nif __name__ == '__main__':\n    read()\n"),
+    ]);
+    let got = steps(&procs(&d)[0]);
+    let names: Vec<&str> = got.iter().map(|s| s.2.as_str()).collect();
+    assert_eq!(names, ["if __name__ == '__main__'", "read()", "get_db()"], "{got:?}");
+    assert_eq!(got[2].0, 2); // under read()
+}
+
+// ---------------------------------------------------------------- SCIP index
+
+fn occ(range: &[i32], symbol: &str, role: i32) -> scip::types::Occurrence {
+    scip::types::Occurrence { range: range.to_vec(), symbol: symbol.into(), symbol_roles: role, ..Default::default() }
+}
+
+fn scip_repo(files: &[(&str, &str)], docs: Vec<(&str, Vec<scip::types::Occurrence>)>) -> Value {
+    use protobuf::Message;
+    let d = tempfile::tempdir().unwrap();
+    for (rel, text) in files {
+        fs::write(d.path().join(rel), text).unwrap();
+    }
+    let index = scip::types::Index {
+        documents: docs.into_iter().map(|(p, o)| scip::types::Document { relative_path: p.into(), occurrences: o, ..Default::default() }).collect(),
+        ..Default::default()
+    };
+    fs::write(d.path().join("index.scip"), index.write_to_bytes().unwrap()).unwrap();
+    repoatlas::analyze(d.path(), "fixture").unwrap()
+}
+
+#[test]
+fn a_scip_index_settles_which_class_a_call_runs_and_what_is_outside() {
+    let app = "from m import A, B\n\ndef run(x):\n    x.process()\n    x.helper()\n\nif __name__ == '__main__':\n    run(A())\n";
+    let m = "class A:\n    def process(self):\n        pass\n    def helper(self):\n        pass\n\nclass B:\n    def process(self):\n        pass\n";
+    // without the index both classes have `process`, and `helper` is guessed from the one class that has it
+    let plain = analyze(&[("app.py", app), ("m.py", m)]);
+    let names = |d: &Value| steps(&procs(d)[0]).into_iter().map(|s| s.2).collect::<Vec<_>>();
+    let before = names(&plain);
+    assert!(before.contains(&"A.helper()".to_string()) && before.iter().any(|n| n.contains("one of")), "{before:?}");
+
+    let d = scip_repo(&[("app.py", app), ("m.py", m)], vec![
+        ("app.py", vec![occ(&[3, 6, 13], "scip-python python demo 1 m/B#process().", 0), occ(&[4, 6, 12], "scip-python python lib 1 lib/Thing#helper().", 0)]),
+        ("m.py", vec![
+            occ(&[1, 8, 15], "scip-python python demo 1 m/A#process().", 1),
+            occ(&[3, 8, 14], "scip-python python demo 1 m/A#helper().", 1),
+            occ(&[7, 8, 15], "scip-python python demo 1 m/B#process().", 1),
+        ]),
+    ]);
+    let after = names(&d);
+    assert!(after.contains(&"B.process()".to_string()), "{after:?}");
+    assert!(!after.iter().any(|n| n == "A.process()" || n == "A.helper()" || n.contains("one of")), "{after:?}");
+    assert_eq!(d["repo"]["scip"]["calls"], 2);
+}
+
+#[test]
+fn a_call_on_an_interface_runs_what_the_index_says_implements_it() {
+    let app = "from m import Shape\n\ndef show(s: Shape):\n    s.area()\n\nif __name__ == '__main__':\n    show(None)\n";
+    let m = "class Shape:\n    def area(self):\n        pass\n\nclass Square(Shape):\n    def area(self):\n        return 4\n\nclass Circle(Shape):\n    def area(self):\n        return 3\n";
+    let mut square = scip::types::SymbolInformation { symbol: "py m/Square#area().".into(), ..Default::default() };
+    square.relationships.push(scip::types::Relationship { symbol: "py m/Shape#area().".into(), is_implementation: true, ..Default::default() });
+    use protobuf::Message;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("app.py"), app).unwrap();
+    fs::write(dir.path().join("m.py"), m).unwrap();
+    let index = scip::types::Index {
+        documents: vec![
+            scip::types::Document { relative_path: "app.py".into(), occurrences: vec![occ(&[3, 6, 10], "py m/Shape#area().", 0)], ..Default::default() },
+            scip::types::Document {
+                relative_path: "m.py".into(),
+                occurrences: vec![occ(&[1, 8, 12], "py m/Shape#area().", 1), occ(&[5, 8, 12], "py m/Square#area().", 1)],
+                symbols: vec![square],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    fs::write(dir.path().join("index.scip"), index.write_to_bytes().unwrap()).unwrap();
+    let d = repoatlas::analyze(dir.path(), "fixture").unwrap();
+    let names: Vec<String> = steps(&procs(&d)[0]).into_iter().map(|s| s.2).collect();
+    // the interface's method and the one implementation the index lists; Circle is not named by it
+    assert!(names.contains(&"Shape.area()".to_string()) && names.contains(&"Square.area()".to_string()), "{names:?}");
+    assert!(!names.contains(&"Circle.area()".to_string()), "{names:?}");
+}
+
+#[test]
+fn a_bad_scip_file_given_on_the_command_line_is_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("a.py"), "def f(): pass\n").unwrap();
+    fs::write(d.path().join("bad.scip"), b"\xff\xfe not protobuf").unwrap();
+    let err = repoatlas::analyze_with(d.path(), "x", Some(&d.path().join("bad.scip"))).unwrap_err();
+    assert!(err.contains("bad.scip"), "{err}");
+    // an index.scip found by itself that cannot be read is ignored
+    fs::write(d.path().join("index.scip"), b"\xff\xfe not protobuf").unwrap();
+    assert!(repoatlas::analyze(d.path(), "x").is_ok());
+}

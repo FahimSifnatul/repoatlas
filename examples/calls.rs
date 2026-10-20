@@ -18,7 +18,7 @@ fn main() {
         u.remove(&f.path);
         f.uses = u.into_iter().collect();
     }
-    let (t, guess) = graph::resolve_calls(&files, &project.rust_libs());
+    let (t, guess, _) = graph::resolve_calls(&mut files, &project.rust_libs(), None);
     let fi = paths.iter().position(|p| p == &a[2]).expect("file");
     let f = &files[fi];
     println!("uses {:?}", f.uses);
