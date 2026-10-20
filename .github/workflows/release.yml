@@ -1,10 +1,11 @@
 name: release
 
-# Publishes a GitHub Release with the single-file `repoatlas` executable attached. install.sh downloads exactly that file.
+# Publishes a GitHub Release with one ready-made `repoatlas` program per platform attached
+# (repoatlas-macos-aarch64, repoatlas-linux-x86_64 ...). install.sh downloads the one that fits the machine.
 # Two ways to trigger it:
-#   - bump __version__ in repoatlas/__init__.py and push to master: this tags vX.Y.Z on that commit and releases it
+#   - bump `version` in Cargo.toml and push to master: this tags vX.Y.Z on that commit and releases it
 #     (a push whose version is already tagged does nothing)
-#   - or push a tag such as v1.0.0 yourself; it must match __version__
+#   - or push a tag such as v2.0.0 yourself; it must match the version in Cargo.toml
 on:
   push:
     branches: [master]
@@ -18,39 +19,74 @@ concurrency:                          # never two releases at once; a queued run
   cancel-in-progress: false
 
 jobs:
-  release:
+  tag:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Decide the tag
         id: tag
         run: |
-          tag="v$(python -c "import repoatlas; print(repoatlas.__version__)")"
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             if [ "$tag" != "$GITHUB_REF_NAME" ]; then
-              echo "Tag $GITHUB_REF_NAME does not match repoatlas.__version__ (${tag#v}). Fix one of them and re-tag." >&2
+              echo "Tag $GITHUB_REF_NAME does not match the version in Cargo.toml (${tag#v}). Fix one of them and re-tag." >&2
               exit 1
             fi
           elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-            echo "$tag already exists, nothing to release. Bump __version__ in repoatlas/__init__.py to publish a new one."
+            echo "$tag already exists, nothing to release. Bump the version in Cargo.toml to publish a new one."
             exit 0
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - if: steps.tag.outputs.tag
-        run: python -m unittest discover -s tests
-      - name: Build the executable
-        if: steps.tag.outputs.tag
+
+  build:
+    needs: tag
+    if: needs.tag.outputs.tag
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, asset: repoatlas-macos-aarch64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, asset: repoatlas-macos-x86_64 }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: repoatlas-linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: repoatlas-linux-aarch64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: repoatlas-windows-x86_64.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust for ${{ matrix.target }}
+        shell: bash
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
+      - name: musl C compiler          # the grammars are C code, compiled into the one static program
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo test --release --locked --target ${{ matrix.target }}
+        if: "!contains(matrix.target, 'x86_64-apple')"   # built on an arm runner: cannot run it
+      - name: Build
+        shell: bash
         run: |
-          python scripts/build_binary.py
-          dist/repoatlas --version
-          cd dist && sha256sum repoatlas > repoatlas.sha256
+          cargo build --release --locked --target ${{ matrix.target }}
+          exe=target/${{ matrix.target }}/release/repoatlas
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          mkdir -p out && cp "$exe" "out/${{ matrix.asset }}"
+          cd out && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/*
+
+  publish:
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
       - name: Publish the release
-        if: steps.tag.outputs.tag
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.tag.outputs.tag }}
         # --target creates the tag on this commit when it does not exist yet (a version bump pushed to master)
-        run: gh release create "$TAG" dist/repoatlas dist/repoatlas.sha256 --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+        run: gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes

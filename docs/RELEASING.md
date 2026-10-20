@@ -6,16 +6,18 @@ From the project folder:
 
 ```sh
 scripts/personalize.sh FahimSifnatul      # puts your GitHub username into the README, installer, formula...
-git init -b master && git add . && git commit -m "repoatlas 1.0.0"
+git init -b master && git add . && git commit -m "repoatlas 2.0.0"
 gh repo create repoatlas --public --source=. --push
 #   no gh? create an empty public repo called "repoatlas" on github.com, then:
 #   git remote add origin git@github.com:FahimSifnatul/repoatlas.git && git push -u origin master
 ```
 
-Pushing to `master` starts the **release** workflow. When the tag `v` + `repoatlas.__version__` does not exist yet, it
-runs the tests, builds the single-file executable, creates the tag on that commit, and publishes a GitHub Release
-with `repoatlas` and `repoatlas.sha256` attached. Watch it under the repository's Actions tab. Pushing a tag such as
-`v1.0.0` yourself works too; the workflow then checks that it matches `repoatlas.__version__`.
+Pushing to `master` starts the **release** workflow. When the tag `v` + the `version` in `Cargo.toml` does not exist
+yet, it builds and tests the program on each platform (macOS arm64 and x86_64, Linux x86_64 and arm64, Windows
+x86_64), creates the tag on that commit, and publishes a GitHub Release with one file per platform attached, each with
+its `.sha256` (`repoatlas-macos-aarch64`, `repoatlas-linux-x86_64`, ...). Watch it under the repository's Actions tab.
+Pushing a tag such as `v2.0.0` yourself works too; the workflow then checks that it matches `Cargo.toml`.
+The Linux files are fully static, so they run on any distribution.
 
 Now the one-line install from the README works for everybody. Until the first release exists, the installer
 falls back to building from the `master` branch, so it works straight after the first push too.
@@ -36,7 +38,7 @@ without anyone's approval, and people install from it with one command.
 **Fill in the formula** (the tag must already be pushed, because Homebrew installs from GitHub's tarball of it):
 
 ```sh
-scripts/update_formula.sh v1.0.0         # writes the tarball URL and its sha256 into the formula
+scripts/update_formula.sh v2.0.0         # writes the tarball URL and its sha256 into the formula
 ```
 
 **Create the tap, test the formula locally:**
@@ -54,43 +56,36 @@ brew audit --strict FahimSifnatul/tap/repoatlas
 ```sh
 cd "$(brew --repository FahimSifnatul/tap)"
 git remote add origin git@github.com:FahimSifnatul/homebrew-tap.git
-git add . && git commit -m "repoatlas 1.0.0" && git push -u origin main
+git add . && git commit -m "repoatlas 2.0.0" && git push -u origin main
 ```
 
 Anyone can now run `brew install FahimSifnatul/tap/repoatlas`, and `brew upgrade repoatlas` later. The README
 already lists this command, so do this step before you advertise the repository.
 
-**How the formula works.** repoatlas only needs Python's standard library, so the formula copies the package into
-Homebrew's `libexec` and writes a small launcher in `bin/` that runs it with Homebrew's own Python
-(`python@3.13`). There are no dependencies to keep up to date. When `python@3.13` is retired, change its three
-mentions in the formula.
+**How the formula works.** It builds repoatlas from the release tarball with Homebrew's `rust` (needed only while
+building) and `cargo install`. The result is one program with nothing to keep up to date.
 
 A person who installs with both Homebrew and `install.sh` ends up with two copies. The installer warns when
 another `repoatlas` comes first on the `PATH`, so they know which one runs.
 
 **Getting into the main Homebrew repository later (optional).** It accepts projects that are stable, tagged,
-licensed and reasonably well known (roughly 75 or more stars). Reviewers prefer Python tools to use
-`virtualenv_install_with_resources`, which works with this `pyproject.toml`; with no dependencies there are no
-`resource` blocks to add. Start with `brew create <tarball url>` and `brew audit --new --strict`.
+licensed and reasonably well known (roughly 75 or more stars). The formula already follows the usual pattern for
+Rust tools (`depends_on "rust" => :build` and `std_cargo_args`). Start with `brew create <tarball url>` and
+`brew audit --new --strict`.
 
 ## 3. Every later release
 
-1. Change `__version__` in `repoatlas/__init__.py`, commit, and `git push origin master` (the workflow tags `v1.1.0`
-   and publishes the new executable). Pushes that do not change the version release nothing.
-2. `scripts/update_formula.sh v1.1.0`, copy the formula into the tap repository, commit and push.
+1. Change `version` in `Cargo.toml`, run `cargo build` (it updates `Cargo.lock`), commit both, and
+   `git push origin master` (the workflow tags `v2.1.0` and publishes the new programs). Pushes that do not change
+   the version release nothing.
+2. `scripts/update_formula.sh v2.1.0`, copy the formula into the tap repository, commit and push.
 
 Everyone who installed with `install.sh` updates by running the same command again.
 
-## 4. PyPI (optional)
-
-The name `repoatlas` is already used on PyPI by a different project, so this package is published as
-**repoatlas-tool** (the command and the module are still `repoatlas`):
+## 4. crates.io (optional)
 
 ```sh
-python -m pip install build twine
-python -m build && twine upload dist/*
-pipx install repoatlas-tool
+cargo publish            # then anyone with Rust can run: cargo install repoatlas
 ```
 
-Note that both projects would install a command and a module called `repoatlas`, so they cannot live in the
-same environment. That is a good reason to think about the name before publishing.
+Check the name is free on [crates.io](https://crates.io/crates/repoatlas) first.

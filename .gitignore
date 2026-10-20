@@ -6,3 +6,4 @@ dist/
 repoatlas.html
 .claude/
 .tokensave/
+/target

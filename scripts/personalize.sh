@@ -13,7 +13,7 @@ esac
 
 cd "$(dirname "$0")/.."
 placeholder="YOUR_GITHUB_""USER"          # written in two pieces so this script never rewrites itself
-files=$(grep -rIl "$placeholder" . --exclude-dir=.git --exclude-dir=dist --exclude-dir=__pycache__ 2>/dev/null || true)
+files=$(grep -rIl "$placeholder" . --exclude-dir=.git --exclude-dir=dist --exclude-dir=target --exclude-dir=__pycache__ 2>/dev/null || true)
 printf '%s\n' "$files" | while IFS= read -r f; do
   [ -n "$f" ] && sed -i.bak "s/$placeholder/$user/g" "$f" && rm -f "$f.bak"
 done

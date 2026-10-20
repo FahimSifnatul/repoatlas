@@ -1,0 +1,599 @@
+//! Links between files and between functions, the same way for every language:
+//! paths and module names written in a file, names a file uses that another defines, and calls resolved
+//! to the definitions they run (same class, same file, imported files, same package, the only one in the repo).
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+use crate::finder::Finder;
+use crate::lang::{Lang, Resolver, Scope};
+use crate::parse::{Call, File, Kind};
+use crate::resolve::dirname;
+use crate::tables::{cat_of, io_of_cat, io_order, COMMON_METHODS, COMMON_NAMES, IN_STRINGS, IO_RES, PATH_REF, STRING};
+
+/// a definition anywhere in the repo: (file index, definition index)
+pub type Gid = (usize, usize);
+
+/// Languages that call into each other's files by the same rules.
+pub fn family(l: &Lang) -> &'static str {
+    match l.resolver {
+        Resolver::Js => "js",
+        Resolver::Jvm => "jvm",
+        Resolver::C => "c",
+        _ => l.name,
+    }
+}
+
+fn ident(s: &str) -> bool {
+    static ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_$@][\w$]*$").unwrap());
+    ID.is_match(s)
+}
+
+/// File -> files it names by path (templates, assets, scripts) or by module name in a string ("food.settings",
+/// "gunicorn app.wsgi"), plus files defining names it uses where the language needs no import for them.
+pub fn link(files: &[File], find: &Finder) -> Vec<BTreeSet<String>> {
+    static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z_]\w*").unwrap());
+    static CAMEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z][a-z0-9]+[A-Z]\w*").unwrap());
+    let mut defs: HashMap<(&str, &str, &str), BTreeSet<&str>> = HashMap::new();
+    for f in files {
+        if f.lang.scope == Scope::Imports {
+            continue;
+        }
+        let scope = if f.lang.scope == Scope::Folder { dirname(&f.path) } else { "" };
+        for d in f.defs.iter().skip(1) {
+            if matches!(d.kind, Kind::Func | Kind::Class | Kind::Type) && d.owner.is_none() && d.name.len() >= 3
+                && !d.name.starts_with('_') && !COMMON_NAMES.contains(&d.name.as_str())
+            {
+                defs.entry((family(f.lang), scope, d.name.as_str())).or_default().insert(&f.path);
+            }
+        }
+    }
+    files
+        .iter()
+        .map(|f| {
+            let d = dirname(&f.path);
+            let mut refs: BTreeSet<String> = BTreeSet::new();
+            let toks: BTreeSet<String> = PATH_REF.captures_iter(&f.bare).filter_map(|c| c.ok().map(|c| c[1].to_string())).collect();
+            for tok in toks {
+                refs.extend(find.path(&tok, d));
+            }
+            let strs: BTreeSet<&str> = STRING
+                .captures_iter(&f.bare)
+                .filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|m| m.as_str()))
+                .collect();
+            for s in &strs {
+                // frameworks wire code together with names in strings
+                refs.extend(find.command(s, d, false, None));
+                refs.extend(find.pattern(s, d));
+            }
+            if f.lang.scope != Scope::Imports {
+                let scope = if f.lang.scope == Scope::Folder { d } else { "" };
+                let mut words: BTreeSet<&str> = WORD.find_iter(&f.code).map(|m| m.as_str()).collect();
+                words.extend(strs.iter().flat_map(|s| CAMEL.find_iter(s).map(|m| m.as_str()))); // 'AuthController@login'
+                for w in words {
+                    if let Some(hit) = defs.get(&(family(f.lang), scope, w)) {
+                        if hit.len() == 1 {
+                            // a name two files define says nothing
+                            refs.extend(hit.iter().map(|s| s.to_string()));
+                        }
+                    }
+                }
+            }
+            refs.remove(&f.path);
+            refs
+        })
+        .collect()
+}
+
+struct Index<'a> {
+    files: &'a [File],
+    by_path: HashMap<&'a str, usize>,
+    /// (family, name) -> top-level functions and classes
+    top: HashMap<(&'static str, &'a str), Vec<Gid>>,
+    /// (family, class, name) -> methods
+    methods: HashMap<(&'static str, &'a str, &'a str), Vec<Gid>>,
+    /// (family, name) -> methods of any class
+    any_method: HashMap<(&'static str, &'a str), Vec<Gid>>,
+    /// (family, name) -> classes
+    classes: HashMap<(&'static str, &'a str), Vec<Gid>>,
+    /// (family, base) -> classes built on it
+    subclasses: HashMap<(&'static str, &'a str), Vec<&'a str>>,
+    /// (family, lower-case name) -> class names
+    lower: HashMap<(&'static str, String), BTreeSet<&'a str>>,
+    /// file -> the files it reaches through what it imports (built on first use)
+    reach: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
+}
+
+const SELF: &[&str] = &["self", "this", "cls", "$this", "Self", "static", "@"];
+const SUPER: &[&str] = &["super", "parent", "base"];
+const CTORS: &[&str] = &["__init__", "constructor", "initialize", "new", "init"];
+
+impl<'a> Index<'a> {
+    fn new(files: &'a [File]) -> Index<'a> {
+        let mut ix = Index {
+            files, by_path: files.iter().enumerate().map(|(i, f)| (f.path.as_str(), i)).collect(), top: HashMap::new(),
+            methods: HashMap::new(), any_method: HashMap::new(), classes: HashMap::new(), subclasses: HashMap::new(),
+            reach: Default::default(), lower: HashMap::new(),
+        };
+        for (fi, f) in files.iter().enumerate() {
+            let fam = family(f.lang);
+            for (di, d) in f.defs.iter().enumerate().skip(1) {
+                match (d.kind, &d.owner) {
+                    (Kind::Func, Some(o)) => {
+                        ix.methods.entry((fam, o, &d.name)).or_default().push((fi, di));
+                        ix.any_method.entry((fam, &d.name)).or_default().push((fi, di));
+                    }
+                    (Kind::Func, None) => ix.top.entry((fam, &d.name)).or_default().push((fi, di)),
+                    (Kind::Class | Kind::Type, _) => {
+                        ix.top.entry((fam, &d.name)).or_default().push((fi, di));
+                        ix.classes.entry((fam, &d.name)).or_default().push((fi, di));
+                        ix.lower.entry((fam, d.name.to_lowercase())).or_default().insert(&d.name);
+                        for b in &d.bases {
+                            ix.subclasses.entry((fam, b)).or_default().push(&d.name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ix
+    }
+
+    /// the files `fi` can see: itself and everything its imports lead to
+    fn reaches(&self, fi: usize) -> std::rc::Rc<HashSet<usize>> {
+        if let Some(r) = self.reach.borrow().get(&fi) {
+            return r.clone();
+        }
+        let mut seen: HashSet<usize> = [fi].into();
+        let mut todo = vec![fi];
+        while let Some(i) = todo.pop() {
+            for u in &self.files[i].uses {
+                if let Some(&j) = self.by_path.get(u.as_str()) {
+                    if seen.insert(j) {
+                        todo.push(j);
+                    }
+                }
+            }
+        }
+        let r = std::rc::Rc::new(seen);
+        self.reach.borrow_mut().insert(fi, r.clone());
+        r
+    }
+
+    /// code outside the tests never runs a test file's definitions
+    fn live(&self, g: Gid, caller: usize) -> bool {
+        self.files[caller].layer == Some("tests") || self.files[g.0].layer != Some("tests")
+    }
+
+    fn def(&self, g: Gid) -> &'a crate::parse::Def {
+        &self.files[g.0].defs[g.1]
+    }
+
+    /// the class a definition is written in
+    fn owner_of(&self, fi: usize, di: usize) -> Option<&'a str> {
+        let defs = &self.files[fi].defs;
+        let mut i = Some(di);
+        while let Some(j) = i {
+            let d = &defs[j];
+            if let Some(o) = &d.owner {
+                return Some(o);
+            }
+            if matches!(d.kind, Kind::Class | Kind::Impl) {
+                return Some(&d.name);
+            }
+            i = d.parent;
+        }
+        None
+    }
+
+    /// a class -> what calling it runs: its constructor, else the class itself
+    fn construct(&self, g: Gid) -> Gid {
+        let d = self.def(g);
+        if !matches!(d.kind, Kind::Class) {
+            return g;
+        }
+        let fam = family(self.files[g.0].lang);
+        for c in CTORS.iter().copied().chain([d.name.as_str()]) {
+            if let Some(m) = self.methods.get(&(fam, d.name.as_str(), c)) {
+                return m.iter().copied().find(|m| m.0 == g.0).unwrap_or(m[0]);
+            }
+        }
+        g
+    }
+
+    /// methods called `name` of class `cls` (searching up its bases), plus the overrides in classes built on it
+    fn method(&self, fam: &'static str, cls: &str, name: &str, overrides: bool) -> Vec<Gid> {
+        let mut out = vec![];
+        let mut todo = vec![cls.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(c) = todo.pop() {
+            if !seen.insert(c.clone()) || seen.len() > 8 {
+                continue;
+            }
+            if let Some(m) = self.methods.get(&(fam, c.as_str(), name)) {
+                out.extend(m.iter().copied());
+                break;
+            }
+            for k in self.classes.get(&(fam, c.as_str())).into_iter().flatten() {
+                todo.extend(self.def(*k).bases.iter().cloned());
+            }
+        }
+        if overrides && !out.is_empty() {
+            for sub in self.subclasses.get(&(fam, cls)).into_iter().flatten() {
+                if let Some(m) = self.methods.get(&(fam, *sub, name)) {
+                    out.extend(m.iter().copied());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out.truncate(6);
+        out
+    }
+
+    /// top-level definitions called `name` in the given files (a function nested in another counts only in its own file)
+    fn in_files(&self, fam: &'static str, name: &str, files: &HashSet<usize>, funcs_only: bool, home: usize) -> Vec<Gid> {
+        self.top
+            .get(&(fam, name))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|g| files.contains(&g.0) && (!funcs_only || self.def(*g).kind == Kind::Func))
+            .filter(|g| g.0 == home || self.def(*g).parent == Some(0))
+            .collect()
+    }
+
+    /// prefer the class written in this file, then one in a file it imports
+    fn class_named(&self, fam: &'static str, name: &str, fi: usize, imported: &HashSet<usize>) -> Option<Gid> {
+        let ks = self.classes.get(&(fam, name))?;
+        ks.iter().copied().find(|g| g.0 == fi).or_else(|| ks.iter().copied().find(|g| imported.contains(&g.0))).or(ks.first().copied())
+    }
+
+    fn resolve(&self, fi: usize, c: &Call, imported: &HashSet<usize>, folder: &HashSet<usize>, types: &HashMap<String, String>) -> Vec<Gid> {
+        let f = &self.files[fi];
+        let fam = family(f.lang);
+        let name = c.name.as_str();
+        let recv = c.recv.as_str();
+        let here: HashSet<usize> = [fi].into();
+        let one = |v: Vec<Gid>| -> Vec<Gid> {
+            // the nearest file wins; several in one file (overloads) collapse to the first
+            let mut v = v;
+            v.sort_by_key(|g| (g.0 != fi, g.1));
+            v.truncate(1);
+            v
+        };
+        if c.is_ref {
+            for scope in [&here, imported, folder] {
+                let v = if recv.is_empty() { self.in_files(fam, name, scope, true, fi) } else { vec![] };
+                if !v.is_empty() {
+                    return one(v);
+                }
+            }
+            // a module handed over (`app.use(routes)`), or something of one (`items.router`): a function of that
+            // module, else the object its top level builds
+            let module = if recv.is_empty() { name } else { recv };
+            let file = f.bound.iter().find(|(a, _)| a == module).and_then(|(_, p)| self.by_path.get(p.as_str()).copied());
+            if let Some(i) = file {
+                let defined: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| g.0 == i).collect();
+                // the module itself (`items`, a default import), or a name its top level builds with a call
+                let p = &self.files[i].path;
+                let is_module = f.lang.resolver == crate::lang::Resolver::Js || norm(crate::layers::stem(p)) == norm(module)
+                    || norm(crate::resolve::basename(dirname(p))) == norm(module);
+                let built = || {
+                    let re = Regex::new(&format!(r"(?m)^\s*{}\s*(?::[^=\n]+)?=\s*[\w.]+\s*\(", regex::escape(name))).unwrap();
+                    re.is_match(&self.files[i].code)
+                };
+                return match (recv.is_empty(), defined.first()) {
+                    (false, Some(g)) if is_module && self.def(*g).kind == Kind::Func => vec![*g],
+                    (_, Some(_)) => vec![],           // a class handed over runs nothing yet
+                    (false, None) if is_module && i != fi => vec![(i, 0)],
+                    (true, None) if i != fi && (is_module || built()) => vec![(i, 0)],
+                    _ => vec![],
+                };
+            }
+            if !recv.is_empty() {
+                return vec![];
+            }
+            if f.aliases.iter().any(|a| a == name) {
+                let key = norm(name);
+                let hit: Vec<usize> = imported.iter().copied().filter(|&i| {
+                    let p = &self.files[i].path;
+                    let st = crate::layers::stem(p);
+                    norm(st) == key || (["index", "__init__", "mod"].contains(&st) && norm(crate::resolve::basename(dirname(p))) == key)
+                }).collect();
+                if hit.len() == 1 {
+                    return vec![(hit[0], 0)];
+                }
+            }
+            return vec![];
+        }
+        let owner = self.owner_of(fi, c.def);
+        // 1. self.x() / this.x(): the class it is written in (and the classes that override it)
+        if SELF.contains(&recv) || (recv.is_empty() && f.lang.implicit_this && owner.is_some()) {
+            if let Some(o) = owner {
+                let v = self.method(fam, o, name, true);
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+            if !recv.is_empty() {
+                return vec![];
+            }
+        }
+        if SUPER.contains(&recv) || recv.starts_with("super(") {
+            if let Some(o) = owner {
+                for k in self.classes.get(&(fam, o)).into_iter().flatten() {
+                    for b in &self.def(*k).bases {
+                        let v = self.method(fam, b, name, false);
+                        if !v.is_empty() {
+                            return v;
+                        }
+                    }
+                }
+            }
+            return vec![];
+        }
+        // 2. Foo.x() / Foo::x() / Foo.new: a known class
+        if ident(recv) && self.classes.contains_key(&(fam, recv)) {
+            let v = self.method(fam, recv, name, false);
+            if !v.is_empty() {
+                let mut v = v;
+                v.sort_by_key(|g| g.0 != fi);
+                return v;
+            }
+            if CTORS.contains(&name) {
+                if let Some(k) = self.class_named(fam, recv, fi, imported) {
+                    return vec![self.construct(k)];
+                }
+            }
+            return vec![]; // Kind::Variant(..), Foo.CONSTANT(): nothing of the repo runs
+        }
+        // `util.helper()`: a module or package the file imports by that name
+        let module = !recv.is_empty() && ident(recv) && (f.aliases.iter().any(|a| a == recv)
+            || imported.iter().any(|&i| crate::layers::stem(&self.files[i].path) == recv || crate::resolve::basename(dirname(&self.files[i].path)) == recv));
+        if recv.is_empty() || module {
+            // 3. the same file, 4. a file it imports (`helper()`, `util.helper()`), 5. the same package
+            let mut scopes = vec![];
+            if recv.is_empty() {
+                scopes.push(&here);
+            }
+            scopes.push(imported);
+            if recv.is_empty() {
+                scopes.push(folder);
+            }
+            for scope in scopes {
+                let v = self.in_files(fam, name, scope, false, fi);
+                if !v.is_empty() {
+                    return one(v).into_iter().map(|g| self.construct(g)).collect();
+                }
+            }
+            // 6. the only definition with that name in the repo, where names need no import
+            if recv.is_empty() && f.lang.scope == Scope::Repo && name.len() >= 3 && !COMMON_NAMES.contains(&name) {
+                let v: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| self.live(*g, fi)).collect();
+                if v.len() == 1 {
+                    return vec![self.construct(v[0])];
+                }
+            }
+            if recv.is_empty() {
+                return vec![];
+            }
+        }
+        if !recv.is_empty() && f.text[..c.at].ends_with("::") {
+            // `module::func()` written out in full: the only top-level function of that name
+            if name.len() >= 3 && !COMMON_NAMES.contains(&name) {
+                let v: Vec<Gid> = self.top.get(&(fam, name)).into_iter().flatten().copied().filter(|g| self.def(*g).kind == Kind::Func && self.live(*g, fi)).collect();
+                if v.len() == 1 {
+                    return v;
+                }
+            }
+        }
+        // 7. x.y() on a variable made from a known class (`p = Parser()`, `const db = new Db()`)
+        if let Some(cls) = types.get(recv) {
+            let v = self.method(fam, cls, name, true);
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        // 8. x.y() on an object of unknown type: the method of that name, or "one of N" when several classes have it
+        let word = receiver_word(recv).replace('_', "");
+        if word.len() >= 3 {
+            let singular = word.strip_suffix('s').unwrap_or(&word).to_string();
+            let classes: Vec<&str> = [&word, &singular].iter().flat_map(|w| self.lower.get(&(fam, w.to_string())).into_iter().flatten().copied()).collect();
+            for k in classes {
+                let v = self.method(fam, k, name, true);
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        if COMMON_METHODS.contains(&name) || name.len() < 3 {
+            return vec![];
+        }
+        // only classes the file can see through its imports: `tmp.path()` is not some other module's path()
+        let seen = self.reaches(fi);
+        let v: Vec<Gid> = self.any_method.get(&(fam, name)).into_iter().flatten().copied().filter(|g| seen.contains(&g.0) && self.live(*g, fi)).collect();
+        if !(1..=6).contains(&v.len()) {
+            return vec![];
+        }
+        // and the classes built on them that replace that method
+        let mut out: Vec<Gid> = v.iter().flat_map(|g| self.method(fam, self.def(*g).owner.as_deref().unwrap_or(""), name, true)).collect();
+        out.extend(v);
+        out.sort();
+        out.dedup();
+        out.truncate(6);
+        out
+    }
+}
+
+/// `self.project`, `plugins[f["lang"]]` -> project, plugins
+fn receiver_word(recv: &str) -> String {
+    static BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\[\]]*\]|\([^()]*\)").unwrap());
+    let mut s = recv.to_string();
+    for _ in 0..4 {
+        let t = BRACKETS.replace_all(&s, "").to_string();
+        if t == s {
+            break;
+        }
+        s = t;
+    }
+    s.rsplit(|c: char| !(c.is_alphanumeric() || c == '_')).find(|w| !w.is_empty()).unwrap_or("").trim_start_matches('_').to_lowercase()
+}
+
+fn norm(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase()
+}
+
+/// `x = Foo(...)`, `const x = new Foo()`, `self.x = Foo()`, `x := Foo{}` -> {x: Foo}, for classes of the repo.
+/// A name given two different classes says nothing.
+fn var_types(f: &File, ix: &Index, fam: &'static str) -> HashMap<String, String> {
+    static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?m)(?:^\s*|[;{(]\s*|\b(?:const|let|var|val|auto|my|local)\s+)((?:self\.|this\.|@|\$this->)?[A-Za-z_]\w*)\s*(?::\s*[\w.<>\[\]]+\s*)?:?=\s*(?:new\s+|&)?([A-Z]\w*)\s*[({]").unwrap()
+    });
+    let mut out: HashMap<String, String> = HashMap::new();
+    let mut bad: HashSet<String> = HashSet::new();
+    for c in ASSIGN.captures_iter(&f.code) {
+        let (v, cls) = (c[1].to_string(), &c[2]);
+        if !ix.classes.contains_key(&(fam, cls)) {
+            continue;
+        }
+        if out.get(&v).is_some_and(|k| k != cls) {
+            bad.insert(v.clone());
+        }
+        out.insert(v, cls.to_string());
+    }
+    for v in bad {
+        out.remove(&v);
+    }
+    out
+}
+
+/// For each file, for each of its calls: the definitions it runs (empty = outside the repo).
+pub fn resolve_calls(files: &[File]) -> Vec<Vec<Vec<Gid>>> {
+    let ix = Index::new(files);
+    let mut folders: HashMap<(&str, &str), HashSet<usize>> = HashMap::new();
+    for (i, f) in files.iter().enumerate() {
+        folders.entry((family(f.lang), dirname(&f.path))).or_default().insert(i);
+    }
+    files
+        .iter()
+        .enumerate()
+        .map(|(fi, f)| {
+            let fam = family(f.lang);
+            let mut imported: HashSet<usize> = f.uses.iter().filter_map(|u| ix.by_path.get(u.as_str()).copied()).collect();
+            if f.lang.scope == Scope::Folder {
+                // an imported package is every file of its folder
+                let more: Vec<usize> = imported.iter().flat_map(|&i| folders.get(&(fam, dirname(&files[i].path))).into_iter().flatten().copied()).collect();
+                imported.extend(more);
+            }
+            imported.remove(&fi);
+            let mut folder = if f.lang.scope != Scope::Imports { folders.get(&(fam, dirname(&f.path))).cloned().unwrap_or_default() } else { HashSet::new() };
+            folder.remove(&fi);
+            let types = var_types(f, &ix, fam);
+            f.calls.iter().map(|c| ix.resolve(fi, c, &imported, &folder, &types)).collect()
+        })
+        .collect()
+}
+
+/// What each definition's own body takes in and gives out (nested definitions count for themselves).
+/// carried: names bound to a module of the repo that opens a database / HTTP / queue client, with what it opens.
+pub fn def_io(f: &mut File, carried: &[(String, &'static str)]) {
+    static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z_]\w*").unwrap());
+    let n = f.defs.len();
+    let mut kids: Vec<Vec<usize>> = vec![vec![]; n];
+    for (i, d) in f.defs.iter().enumerate() {
+        if let Some(p) = d.parent {
+            kids[p].push(i);
+        }
+    }
+    // outside libraries that carry I/O (a database driver, an HTTP client): the definitions that name them
+    let mut libs: Vec<(String, &'static str)> = vec![];
+    for (name, spec) in &f.ext {
+        if let Some(io) = cat_of(spec).and_then(io_of_cat) {
+            let local = spec.rsplit(['/', '.']).next().unwrap_or(name).replace('-', "_");
+            libs.push((local, io));
+        }
+    }
+    // names imported from such a library: `from sqlmodel import Session`, `import axios from 'axios'`
+    for imp in f.py_imports.iter().filter(|i| i.is_from) {
+        if let Some(io) = cat_of(&imp.module).and_then(io_of_cat) {
+            libs.extend(imp.names.iter().filter(|n| *n != "*").map(|n| (n.clone(), io)));
+        }
+    }
+    for (alias, spec) in &f.bindings {
+        if let Some(io) = cat_of(spec).and_then(io_of_cat) {
+            libs.push((alias.clone(), io));
+        }
+    }
+    libs.extend(carried.iter().cloned());
+    let mut lib_found: HashSet<&'static str> = HashSet::new();
+    let mut ios = vec![vec![]; n];
+    for i in 0..n {
+        let d = &f.defs[i];
+        if matches!(d.kind, Kind::Class | Kind::Type | Kind::Impl) && i != 0 {
+            continue;
+        }
+        let nested: Vec<(usize, usize)> = kids[i].iter().map(|&k| &f.defs[k]).filter(|kd| matches!(kd.kind, Kind::Func | Kind::Main)).map(|kd| (kd.start, kd.end)).collect();
+        let code = own_text(&f.code, d.start, d.end, &nested);
+        let bare = own_text(&f.bare, d.start, d.end, &nested);
+        let mut found: Vec<&'static str> = IO_RES
+            .iter()
+            .filter(|(k, re)| re.is_match(if IN_STRINGS.contains(k) { &bare } else { &code }))
+            .map(|(k, _)| *k)
+            .collect();
+        if !libs.is_empty() {
+            let words: HashSet<&str> = WORD.find_iter(&code).map(|m| m.as_str()).collect();
+            for (local, io) in &libs {
+                if i != 0 && words.contains(local.as_str()) {
+                    found.push(io);
+                    lib_found.insert(io);
+                }
+            }
+        }
+        if d.route.is_some() || f.routes.iter().any(|r| r.def == i) {
+            found.push("http_in");
+        }
+        ios[i] = found;
+    }
+    for (_, io) in &libs {
+        if !lib_found.contains(io) {
+            ios[0].push(io); // named only at the top of the file
+        }
+    }
+    let has_routes = f.symbols.iter().any(|s| s.k == "route");
+    let mut all: BTreeSet<&'static str> = BTreeSet::new();
+    for (i, mut io) in ios.into_iter().enumerate() {
+        if io.contains(&"http_in") {
+            io.push("http_resp");
+        }
+        io.sort_by_key(|k| io_order(k));
+        io.dedup();
+        all.extend(io.iter().copied());
+        f.defs[i].io = io;
+    }
+    if has_routes {
+        all.insert("http_in");
+        all.insert("http_resp");
+    }
+    let mut all: Vec<&'static str> = all.into_iter().collect();
+    all.sort_by_key(|k| io_order(k));
+    f.io = all;
+}
+
+/// text[a..b] without the nested ranges (each becomes a line break, so no two words join across one)
+fn own_text(text: &str, a: usize, b: usize, nested: &[(usize, usize)]) -> String {
+    let mut out = String::new();
+    let mut at = a;
+    let mut nested = nested.to_vec();
+    nested.sort();
+    for &(s, e) in &nested {
+        if s >= at {
+            out.push_str(crate::text::slice(text, at, s));
+            out.push('\n');
+            at = e;
+        }
+    }
+    out.push_str(crate::text::slice(text, at, b));
+    out
+}

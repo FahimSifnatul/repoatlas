@@ -2,73 +2,75 @@
 
 ## Setup
 
-There is nothing to install: repoatlas uses only the Python standard library.
+Install [Rust](https://rustup.rs) (one command, no sudo). Everything else is fetched by `cargo`.
 
 ```sh
 git clone https://github.com/FahimSifnatul/repoatlas.git && cd repoatlas
-python3 -m repoatlas .                          # run it on itself
-python3 -m unittest discover -s tests -v      # run the tests (Python 3.8 to 3.14)
+cargo run --release -- .                      # run it on itself
+cargo test                                    # the fixture repositories and the command
+cargo clippy --all-targets -- -D warnings     # CI fails on any warning
+python3 -m unittest tests/test_install.py     # the installer, if you touched install.sh
 shellcheck -s sh install.sh scripts/*.sh      # lint the shell scripts, if you touched them
 ```
 
 ## Layout
 
 ```
-repoatlas/                    the Python package (what gets installed)
-  cli.py                      the `repoatlas` command
-  core.py                     the language-neutral pipeline: scan, resolve, classify, group, render
-  viewer.html                 the interactive page (plain CSS and JS, no build step)
-  languages/                  ONE FILE PER LANGUAGE
-    base.py                     Language base class and shared helpers
-    python.py  javascript.py  typescript.py  vue.py  svelte.py
-    go.py  java.py  kotlin.py  rust.py  c.py  cpp.py
-    ruby.py  php.py  csharp.py  swift.py  scala.py  shell.py  html.py  css.py
-tests/                      a fixture repository per language, the command, and the installer
+src/
+  main.rs                   the `repoatlas` command
+  atlas.rs                  the pipeline: scan, parse, link, layers, parts, programs, journeys -> one JSON model
+  scan.rs                   walk the repository
+  lang.rs                   ONE ENTRY PER LANGUAGE: extensions, grammar, entry-point rule, how names are found
+  queries/*.scm             ONE QUERY PER GRAMMAR: definitions, calls, comments and strings in the syntax tree
+  parse.rs                  syntax tree -> definitions, calls, routes, imports, symbols
+  resolve.rs                imports -> files of the repo and outside libraries (per language)
+  graph.rs                  calls -> the functions they run, links between files, inputs / outputs per function
+  launch.rs                 how the project is started: Dockerfile, compose, Procfile, package.json, Makefile ...
+  layers.rs                 layers, parts, files a framework loads by convention
+  journey.rs                one program's steps, from where it starts to where it ends
+  finder.rs                 repo files by path, module name, command line or run-time pattern
+  tables.rs                 data only: layers, file-name words, library catalogue, input / output patterns
+  viewer.html               the interactive page (plain CSS and JS, no build step)
+tests/fixtures.rs           a small repository per case, and the command
+tests/test_install.py       the installer
+examples/                   dump.rs (print a syntax tree), calls.rs (print what each call resolves to)
 install.sh                  the one-line installer
-scripts/                    build_binary.py (single-file executable), personalize.sh, update_formula.sh
+scripts/                    personalize.sh, update_formula.sh
 packaging/homebrew/         the Homebrew formula
 docs/                       screenshots and a finished example
 ```
 
-`core.py` knows nothing about any particular language. Everything language-specific (what an import looks
-like, how it maps to a file, what counts as a function, the colour in the language bar) lives in that
-language's file. The core adds what works the same everywhere: file paths and module names written in the code, names a file
-uses that another file defines, launch files (Dockerfile, compose, Procfile, Makefile ...), files a framework
-loads by convention, and inputs / outputs. It must never name a framework: framework knowledge lives only in
-data tables (`EXT_CATS`, `LAUNCH_FILES`), and a test checks that.
+Only `lang.rs`, `queries/` and `resolve.rs` know about particular languages. The rest works the same for every
+language: definitions and calls come from the query, calls are matched to functions by the same rules everywhere,
+and launch files, conventions and inputs / outputs are language-neutral. Nothing may name a framework: framework
+knowledge lives only in data tables (`EXT_CATS` in `tables.rs`), and a test checks that.
 
 ## Adding a language
 
-Create `repoatlas/languages/<name>.py`. It is discovered automatically; nothing else needs editing.
+1. Add the grammar crate: `cargo add tree-sitter-lua`.
+2. Write `src/queries/lua.scm`. Start from the grammar's own `queries/tags.scm` if it has one. The captures are:
 
-```python
-import re
-from .base import Language, line_of
+   | capture | on | means |
+   |---|---|---|
+   | `@func` / `@class` / `@type` + `@name` | a definition node, its name | a function / class / interface or type |
+   | `@impl` + `@name` | a block of methods for a type | Rust `impl`: methods inside belong to `@name` |
+   | `@owner` | inside a `@func` match | the class a method belongs to, when written outside it (Go, C++) |
+   | `@call` + `@callee` | a call node, the name it calls | `obj.run(x)`: what is before `@callee` is the receiver |
+   | `@ref` | an identifier handed to a call | `Thread(target=run)`, `app.get("/x", handler)` |
+   | `@guard` | a top-level statement | `if __name__ == "__main__":`-style blocks |
+   | `@comment` / `@doc` / `@string` | comments, docstrings, string literals | text that is not code |
 
-class Lua(Language):
-    name = "Lua"
-    extensions = (".lua",)
-    color = "#000080"                    # used by the language bar
-
-    def parse(self, f):                  # fill in what the file contains
-        f["imports"] = re.findall(r'require\s*\(?\s*["\']([\w.]+)["\']', f["text"])
-        for m in re.finditer(r"^(?:local\s+)?function\s+([\w.:]+)", f["text"], re.M):
-            f["symbols"].append(dict(k="function", n=m.group(1), sig="", doc="",
-                                     line=line_of(f["text"], m.start())))
-
-    def resolve(self, project, f):       # imports -> (files in the repo, outside libraries)
-        uses = {p for i in f["imports"] for p in [i.replace(".", "/") + ".lua"] if p in project.paths}
-        return uses, set()
-```
-
-Optional hooks: `prepare(project)` to read a manifest once (see `go.py`), `manifests`, `entry_by_name`,
-`entry_re` (what a `main()` looks like), `interpreters` (`#!` names for scripts with no extension), `implicit` (`"repo"`, `"folder"` or `"none"`: where a name is usable
-without an import; set `"none"` once `resolve()` follows every import), `default_layer`, `stem_layers`,
-`skip_suffixes`. Start from `ruby.py` (smallest) or `go.py` (typical), then add a
-fixture to `tests/test_languages.py`.
+   `cargo run --example dump -- <grammar> <file>` prints a file's syntax tree with its node and field names.
+3. Add the grammar to `GRAMMARS` and a `Lang` entry to `LANGS` in `src/lang.rs`: name, extensions, colour, and the
+   options that fit (`entry_re` for what a program's start looks like, `scope` for where a name is usable without an
+   import, `implicit_this` when a bare call inside a class can be a method of it, `interpreters` for `#!` scripts).
+4. If its imports name files, add a resolver to `resolve.rs` (see `resolve_c`, the smallest). Otherwise calls are
+   matched by name, which is often enough.
+5. Add a fixture to `tests/fixtures.rs`. `cargo run --example calls -- <repo> <file>` shows what each call in a
+   file was matched to.
 
 ## Ground rules
 
-* Standard library only, and keep Python 3.8 working (CI runs 3.8, 3.10, 3.12 and 3.14).
-* Output must stay deterministic: sort anything that comes out of a `set`.
+* Output must stay deterministic: iterate sorted maps, or sort anything that comes out of a hash set.
+* No step may guess: a call no rule can place is left out, and a program no launch file or entry rule names is not invented.
 * Shell scripts must stay POSIX `sh` and pass `shellcheck`.

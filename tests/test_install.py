@@ -6,6 +6,7 @@ imitates the GitHub URLs, so nothing touches the network or your real shell star
 import hashlib
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -19,9 +20,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / "install.sh"
-PYDIR = str(Path(sys.executable).parent)
+VERSION = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
 PLACEHOLDER = "YOUR_GITHUB_" + "USER"        # split, so personalize.sh does not rewrite this test
-SYSTEM_PATH = f"{PYDIR}:/usr/local/bin:/usr/bin:/bin"
+SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
+CARGO = shutil.which("cargo")
+REAL_HOME = Path.home()
+# the release file install.sh picks for this machine
+ASSET = "repoatlas-{}-{}".format({"Darwin": "macos", "Linux": "linux"}.get(platform.system(), platform.system().lower()),
+                                 {"AMD64": "x86_64", "amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine(), platform.machine()))
+# builds from a clone reuse one target folder and skip link-time optimisation, so they take seconds, not minutes
+BUILD_ENV = {"CARGO_TARGET_DIR": str(ROOT / "target" / "install-tests"), "CARGO_PROFILE_RELEASE_LTO": "false",
+             "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16",
+             "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", str(REAL_HOME / ".rustup")),
+             "CARGO_HOME": os.environ.get("CARGO_HOME", str(REAL_HOME / ".cargo"))}
 # where the installer writes the PATH line for bash: macOS Terminal starts login shells, which read .bash_profile
 BASH_RC = ".bash_profile" if platform.system() == "Darwin" else ".bashrc"
 
@@ -32,12 +43,27 @@ class Quiet(SimpleHTTPRequestHandler):
 
 
 def build_binary():
-    subprocess.run([sys.executable, str(ROOT / "scripts" / "build_binary.py")], check=True, capture_output=True)
-    return ROOT / "dist" / "repoatlas"
+    subprocess.run(["cargo", "build", "--release", "--locked", "--quiet"], cwd=ROOT, check=True, capture_output=True)
+    return ROOT / "target" / "release" / "repoatlas"
+
+
+def copy_source(dst):
+    """A copy of the project, standing in for `git clone`."""
+    shutil.copytree(ROOT, dst, ignore=shutil.ignore_patterns("__pycache__", "dist", "target", ".git", "build", "*.egg-info"))
+    return dst
 
 
 class Sandbox(unittest.TestCase):
-    """A fresh fake home directory per test."""
+    """A fresh fake home directory per test, and one copy of the project shared by the class (so it builds once)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shared = Path(tempfile.mkdtemp(prefix="repoatlas-clone-"))
+        copy_source(cls.shared / "clone")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.shared, ignore_errors=True)
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="repoatlas-test-"))
@@ -46,7 +72,8 @@ class Sandbox(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def env(self, **extra):
-        e = {"HOME": str(self.home), "PATH": SYSTEM_PATH, "SHELL": "/bin/bash", "TMPDIR": str(self.tmp)}
+        path = f"{Path(CARGO).parent}:{SYSTEM_PATH}" if CARGO else SYSTEM_PATH
+        e = {"HOME": str(self.home), "PATH": path, "SHELL": "/bin/bash", "TMPDIR": str(self.tmp), **BUILD_ENV}
         e.update(extra)
         return e
 
@@ -55,10 +82,7 @@ class Sandbox(unittest.TestCase):
                               input=stdin, capture_output=True, text=True, env=self.env(**env), cwd=str(self.tmp))
 
     def clone(self):
-        """A copy of the project, standing in for `git clone`."""
-        dst = self.tmp / "clone"
-        shutil.copytree(ROOT, dst, ignore=shutil.ignore_patterns("__pycache__", "dist", ".git", "build", "*.egg-info"))
-        return dst
+        return self.shared / "clone"
 
     def shell_finds_repoatlas(self, rc_shell="bash"):
         """Open a NEW interactive shell, the way a new terminal window would."""
@@ -68,6 +92,7 @@ class Sandbox(unittest.TestCase):
         return r.stdout
 
 
+@unittest.skipUnless(CARGO, "needs Rust's cargo")
 class FromClone(Sandbox):
     def test_installs_to_path_and_survives_deleting_the_clone(self):
         clone = self.clone()
@@ -78,10 +103,12 @@ class FromClone(Sandbox):
         self.assertIn("Added $HOME/.local/bin to your PATH", r.stdout)
         self.assertIn("you can delete the folder", r.stdout)
 
-        shutil.rmtree(clone)                                  # the whole point: nothing depends on the clone
+        gone = self.tmp / "gone"                              # the whole point: nothing depends on the clone
+        clone.rename(gone)
+        self.addCleanup(gone.rename, clone)
         out = self.shell_finds_repoatlas()
         self.assertIn(str(exe), out)
-        self.assertIn("repoatlas 1.0.0", out)
+        self.assertIn(f"repoatlas {VERSION}", out)
 
         site = self.tmp / "site"
         site.mkdir()
@@ -112,13 +139,13 @@ class FromClone(Sandbox):
         (fake / "uname").write_text("#!/bin/sh\necho Darwin\n")
         (fake / "uname").chmod(0o755)
         clone = self.clone()
-        self.run_install(script=clone / "install.sh", PATH=f"{fake}:{SYSTEM_PATH}")
+        self.run_install(script=clone / "install.sh", PATH=f"{fake}:{self.env()['PATH']}")
         self.assertTrue((self.home / ".bash_profile").exists())
         self.assertFalse((self.home / ".bashrc").exists())
 
     def test_leaves_startup_files_alone_when_already_on_path(self):
         clone = self.clone()
-        r = self.run_install(script=clone / "install.sh", PATH=f"{self.home}/.local/bin:{SYSTEM_PATH}")
+        r = self.run_install(script=clone / "install.sh", PATH=f"{self.home}/.local/bin:{self.env()['PATH']}")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse((self.home / BASH_RC).exists())
         self.assertIn("Ready.", r.stdout)
@@ -135,11 +162,13 @@ class FromClone(Sandbox):
         self.assertIn(f'export PATH="{target}:$PATH"', (self.home / BASH_RC).read_text())
 
 
+@unittest.skipUnless(CARGO, "needs Rust's cargo")
 class Download(Sandbox):
     """`curl | sh`: the script is fed on stdin and has no clone next to it."""
 
     @classmethod
     def setUpClass(cls):
+        super().setUpClass()
         cls.binary = build_binary()
 
     def serve(self, release=True, tamper=False):
@@ -149,12 +178,12 @@ class Download(Sandbox):
             d = repo / "releases" / "latest" / "download"
             d.mkdir(parents=True)
             data = self.binary.read_bytes()
-            (d / "repoatlas").write_bytes(data + (b"#tampered" if tamper else b""))
-            (d / "repoatlas.sha256").write_text(f"{hashlib.sha256(data).hexdigest()}  repoatlas\n")
+            (d / ASSET).write_bytes(data + (b"#tampered" if tamper else b""))
+            (d / f"{ASSET}.sha256").write_text(f"{hashlib.sha256(data).hexdigest()}  {ASSET}\n")
         a = repo / "archive" / "refs" / "heads"
         a.mkdir(parents=True)
         with tarfile.open(a / "master.tar.gz", "w:gz") as t:
-            skip = {"__pycache__", "dist", ".git", "build"}
+            skip = {"__pycache__", "dist", "target", ".git", "build"}
             t.add(ROOT, arcname="repoatlas-master", filter=lambda ti: None if (
                 skip & set(ti.name.split("/")) or ti.name.endswith(".egg-info")) else ti)
         server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=str(web)))
@@ -168,7 +197,7 @@ class Download(Sandbox):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Downloading repoatlas", r.stdout)
         self.assertNotIn("building from source", r.stdout.lower())
-        self.assertIn("repoatlas 1.0.0", self.shell_finds_repoatlas())
+        self.assertIn(f"repoatlas {VERSION}", self.shell_finds_repoatlas())
 
     def test_corrupted_download_is_rejected(self):
         r = self.run_install(stdin=INSTALL.read_text(), **self.serve(tamper=True))
@@ -180,7 +209,7 @@ class Download(Sandbox):
         r = self.run_install(stdin=INSTALL.read_text(), **self.serve(release=False))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("building from source", r.stdout.lower())
-        self.assertIn("repoatlas 1.0.0", self.shell_finds_repoatlas())
+        self.assertIn(f"repoatlas {VERSION}", self.shell_finds_repoatlas())
 
     def test_wrong_repository_is_a_clear_error(self):
         env = self.serve()
@@ -191,21 +220,14 @@ class Download(Sandbox):
 
 
 class Requirements(Sandbox):
-    def test_no_python_says_how_to_get_it(self):
-        r = subprocess.run(["/bin/sh", str(INSTALL)], capture_output=True, text=True, env={"HOME": str(self.home), "PATH": "/nonexistent"})
+    def test_building_without_cargo_says_how_to_get_it(self):
+        if shutil.which("cargo", path=SYSTEM_PATH):
+            self.skipTest("cargo is on the system PATH")
+        r = self.run_install(script=self.clone() / "install.sh", PATH=SYSTEM_PATH)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("Python 3 is required", r.stderr)
-        self.assertIn("apt install python3", r.stderr)
-
-    def test_old_python_is_refused(self):
-        fake = self.tmp / "oldpy"
-        fake.mkdir()
-        (fake / "python3").write_text('#!/bin/sh\n[ "$1" = "-V" ] && echo "Python 3.7.9" && exit 0\nexit 1\n')
-        (fake / "python3").chmod(0o755)
-        r = self.run_install(PATH=f"{fake}:/usr/bin:/bin")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("3.8 or newer", r.stderr)
-        self.assertIn("3.7.9", r.stderr)
+        self.assertIn("needs Rust's cargo", r.stderr)
+        self.assertIn("sh.rustup.rs", r.stderr)
+        self.assertFalse((self.home / ".local/bin/repoatlas").exists())
 
     def test_unknown_option_and_help(self):
         self.assertNotEqual(self.run_install("--bogus").returncode, 0)
@@ -214,6 +236,7 @@ class Requirements(Sandbox):
         self.assertIn("--uninstall", h.stdout)
 
 
+@unittest.skipUnless(CARGO, "needs Rust's cargo")
 class Uninstall(Sandbox):
     def test_removes_repoatlas_but_never_a_foreign_file(self):
         clone = self.clone()

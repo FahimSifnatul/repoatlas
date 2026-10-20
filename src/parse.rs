@@ -1,0 +1,672 @@
+//! One file -> what it defines, what it calls, its imports and routes, from the tree-sitter syntax tree.
+//! Everything here is driven by the language's query (queries/*.scm); nothing names a language's syntax.
+
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
+use regex::Regex;
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Node, Parser, QueryCursor};
+
+use crate::lang::{self, Lang, Resolver};
+use crate::tables::{COMMENTS, DECORATOR_ROUTES, ROUTE_CALLS, ROUTE_RES, STRINGS};
+use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Class,
+    Type,
+    /// `impl Type`: holds methods of Type, is not a symbol of its own
+    Impl,
+    Func,
+    /// the top level of a file: code that runs when the file is loaded or run
+    Module,
+    /// `if __name__ == "__main__":` and the like
+    Main,
+}
+
+#[derive(Clone, Debug)]
+pub struct Def {
+    pub name: String,
+    pub kind: Kind,
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub parent: Option<usize>,
+    /// the class a method belongs to
+    pub owner: Option<String>,
+    pub bases: Vec<String>,
+    pub sig: String,
+    pub doc: String,
+    pub route: Option<(String, String)>,
+    /// what this definition's own body takes in and gives out (filled by analyze)
+    pub io: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Call {
+    pub name: String,
+    /// what it is called on: "self", "Foo", "util", "" for a bare call
+    pub recv: String,
+    pub at: usize,
+    pub end: usize,
+    pub line: usize,
+    /// index of the definition it is written in
+    pub def: usize,
+    /// a function handed to another call (Thread(target=run)), not called right here
+    pub is_ref: bool,
+}
+
+/// A web endpoint registered by a call: app.get("/users", listUsers), mux.HandleFunc("/x", h)
+#[derive(Clone, Debug)]
+pub struct Route {
+    pub verb: String,
+    pub path: String,
+    pub line: usize,
+    pub at: usize,
+    pub end: usize,
+    pub def: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    pub k: &'static str,
+    pub n: String,
+    pub sig: String,
+    pub doc: String,
+    pub line: usize,
+    pub members: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PyImport {
+    pub level: usize,
+    pub module: String,
+    pub names: Vec<String>,
+    pub is_from: bool,
+}
+
+pub struct File {
+    pub path: String,
+    pub lang: &'static Lang,
+    pub text: String,
+    pub loc: usize,
+    /// the text with comments and docstrings blanked out (byte offsets unchanged)
+    pub bare: String,
+    /// `bare` with long strings blanked out too
+    pub code: String,
+    pub defs: Vec<Def>,
+    pub calls: Vec<Call>,
+    pub routes: Vec<Route>,
+    pub symbols: Vec<Symbol>,
+    pub doc: String,
+    pub entry: bool,
+    pub imports: Vec<String>,
+    pub py_imports: Vec<PyImport>,
+    pub mods: Vec<String>,
+    /// names its imports bind: modules, packages and their aliases (`import x as y`, `use a::b`)
+    pub aliases: Vec<String>,
+    /// JS family: (local name, import path) of default and namespace imports
+    pub bindings: Vec<(String, String)>,
+    /// local names bound to a whole file of the repo (filled once imports are resolved)
+    pub bound: Vec<(String, String)>,
+    pub pkg: String,
+    pub layer: Option<&'static str>,
+    pub uses: Vec<String>,
+    pub ext: Vec<(String, String)>,
+    pub io: Vec<&'static str>,
+}
+
+impl File {
+    pub fn new(path: String, lang: &'static Lang, text: String, loc: usize) -> File {
+        File {
+            path, lang, text, loc, bare: String::new(), code: String::new(), defs: vec![], calls: vec![], routes: vec![],
+            symbols: vec![], doc: String::new(), entry: false, imports: vec![], py_imports: vec![], mods: vec![],
+            aliases: vec![], bindings: vec![], bound: vec![], pkg: String::new(), layer: None, uses: vec![], ext: vec![], io: vec![],
+        }
+    }
+
+    /// The definition a program starts at when this file is run: its main guard, its main() where the language
+    /// starts there, else its top level.
+    pub fn entry_def(&self) -> usize {
+        if let Some(i) = self.defs.iter().position(|d| d.kind == Kind::Main) {
+            return i;
+        }
+        if self.lang.entry_re.iter().any(|p| p.contains("main") || p.contains("Main")) && self.lang.scope != crate::lang::Scope::Imports
+            || self.lang.name == "Rust"
+        {
+            if let Some(i) = self.defs.iter().position(|d| d.kind == Kind::Func && (d.name == "main" || d.name == "Main")) {
+                return i;
+            }
+        }
+        0
+    }
+
+    /// A function this file defines at its top level (or a class's method), by name: `module:func` in a command.
+    pub fn def_named(&self, name: &str) -> Option<usize> {
+        self.defs.iter().position(|d| d.kind == Kind::Func && d.name == name && d.parent == Some(0))
+            .or_else(|| self.defs.iter().position(|d| d.kind == Kind::Func && d.name == name))
+    }
+}
+
+fn rx(p: &str) -> Regex {
+    Regex::new(p).unwrap()
+}
+
+/// Replace [a, b) with spaces, keeping newlines and every byte offset.
+fn blank(buf: &mut String, a: usize, b: usize) {
+    let (mut a, mut b) = (a.min(buf.len()), b.min(buf.len()));
+    while a < b && !buf.is_char_boundary(a) {
+        a += 1;
+    }
+    while b > a && !buf.is_char_boundary(b) {
+        b -= 1;
+    }
+    if a >= b {
+        return;
+    }
+    let piece: String = buf[a..b].chars().map(|c| if c == '\n' { "\n".to_string() } else { " ".repeat(c.len_utf8()) }).collect();
+    buf.replace_range(a..b, &piece);
+}
+
+/// Vue / Svelte: only the <script> blocks are code; the rest becomes spaces so offsets stay right.
+fn script_only(text: &str) -> (String, bool) {
+    static BLOCK: LazyLock<Regex> = LazyLock::new(|| rx(r"(?is)<script\b([^>]*)>(.*?)</script>"));
+    let mut out = text.to_string();
+    let mut keep = vec![];
+    let mut ts = false;
+    for c in BLOCK.captures_iter(text) {
+        let body = c.get(2).unwrap();
+        keep.push((body.start(), body.end()));
+        ts |= c[1].contains("ts");
+    }
+    let mut at = 0;
+    for (a, b) in keep.into_iter().chain([(text.len(), text.len())]) {
+        blank(&mut out, at, a);
+        at = b;
+    }
+    (out, ts)
+}
+
+/// The "(a, b)" after a definition's name.
+fn signature(text: &str, name_end: usize, strip_self: bool) -> String {
+    let rest = slice(text, name_end, name_end + 600);
+    let Some(open) = rest.find('(').filter(|&i| i < 40 && !rest[..i].contains(['{', '\n', ';'])) else {
+        return String::new();
+    };
+    let mut depth = 0;
+    let mut close = None;
+    for (i, c) in rest[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else { return String::new() };
+    let mut parts: Vec<String> = squash_ws(&rest[open + 1..close]).split(", ").map(String::from).filter(|p| !p.is_empty()).collect();
+    if strip_self && parts.first().is_some_and(|p| matches!(p.trim_start_matches(['&', ' ']).trim_start_matches("mut "), "self" | "cls")) {
+        parts.remove(0);
+    }
+    let s = parts.join(", ");
+    let s = if s.chars().count() > 70 { format!("{}…", s.chars().take(70).collect::<String>()) } else { s };
+    format!("({s})")
+}
+
+/// Names after a class's own name: `class A(Base)`, `extends B implements C`, `: Base()`, `< Bar`
+fn bases_of(head: &str) -> Vec<String> {
+    static IDENT: LazyLock<Regex> = LazyLock::new(|| rx(r"[A-Za-z_][\w.:]*"));
+    const SKIP: &[&str] = &["extends", "implements", "public", "private", "protected", "internal", "final", "abstract", "class",
+        "struct", "where", "with", "open", "sealed", "data", "object", "metaclass", "virtual", "for", "impl", "new"];
+    let mut out: Vec<String> = vec![];
+    for m in IDENT.find_iter(head) {
+        let last = m.as_str().rsplit(['.', ':']).next().unwrap_or("").to_string();
+        if !last.is_empty() && !SKIP.contains(&last.as_str()) && !out.contains(&last) {
+            out.push(last);
+        }
+    }
+    out.truncate(6);
+    out
+}
+
+/// A Python-style docstring: the first statement of a body, when it is a string.
+fn docstring(node: Node, src: &str) -> String {
+    let body = if node.kind() == "module" { Some(node) } else { node.child_by_field_name("body") };
+    let Some(first) = body.and_then(|b| b.named_child(0)) else { return String::new() };
+    if first.kind() != "expression_statement" {
+        return String::new();
+    }
+    match first.named_child(0) {
+        Some(s) if s.kind() == "string" => {
+            let t = &src[s.byte_range()];
+            let t = t.trim_start_matches(|c: char| "rRbBuUfF".contains(c));
+            first_sentence(t.trim_matches(|c| c == '"' || c == '\''), 150)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Where a definition's decorators / annotations start.
+fn head_of(node: Node) -> usize {
+    let mut start = node.start_byte();
+    if let Some(p) = node.parent().filter(|p| p.kind().contains("decorated")) {
+        start = p.start_byte();
+    }
+    let mut prev = node.prev_named_sibling();
+    while let Some(p) = prev {
+        if !(p.kind().contains("decorator") || p.kind().contains("annotation") || p.kind().contains("attribute")) {
+            break;
+        }
+        start = start.min(p.start_byte());
+        prev = p.prev_named_sibling();
+    }
+    start
+}
+
+fn decorator_route(head: &str) -> Option<(String, String)> {
+    static METHODS: LazyLock<Regex> = LazyLock::new(|| rx(r"methods\s*=\s*[\[(]([^\])]*)"));
+    for re in DECORATOR_ROUTES.iter() {
+        if let Some(c) = re.captures(head) {
+            let mut verb = c[1].to_uppercase();
+            if verb == "ROUTE" || verb == "REQUEST" {
+                verb = "ANY".into();
+                if let Some(m) = METHODS.captures(head) {
+                    let vs: Vec<String> = m[1].split(',').map(|v| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty()).collect();
+                    if !vs.is_empty() {
+                        verb = vs.join("|");
+                    }
+                }
+            }
+            return Some((verb, c[2].to_string()));
+        }
+    }
+    None
+}
+
+/// Strip generics and paths from a captured name: `Foo<T>` -> Foo, `Util::go` -> go
+fn clean_name(s: &str) -> String {
+    let s = s.split('<').next().unwrap_or(s);
+    s.rsplit("::").next().unwrap_or(s).trim().to_string()
+}
+
+pub fn parse(f: &mut File) {
+    let (src, ts_script) = if f.lang.script_blocks { script_only(&f.text) } else { (f.text.clone(), false) };
+    let key = lang::grammar_key(f.lang, &f.path, ts_script);
+    let base = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+    f.defs.push(Def {
+        name: base, kind: Kind::Module, start: 0, end: f.text.len(), line: 1, parent: None, owner: None, bases: vec![],
+        sig: String::new(), doc: String::new(), route: None, io: vec![],
+    });
+    match key.and_then(|k| lang::GRAMMARS.get(k)) {
+        Some(g) => parse_tree(f, &src, g),
+        None => {
+            // a page or style sheet: no syntax tree, only the text
+            f.bare = COMMENTS.replace_all(&f.text, " ").into_owned();
+            f.code = STRINGS.replace_all(&f.bare, "\"\"").into_owned();
+        }
+    }
+    let lines: Vec<&str> = f.text.lines().collect();
+    for d in f.defs.iter_mut().skip(1) {
+        if d.doc.is_empty() && f.lang.header_comments {
+            d.doc = lead_comment(&lines, line_of(&f.text, d.start).saturating_sub(1));
+        }
+    }
+    if f.doc.is_empty() && f.lang.header_comments {
+        f.doc = header_doc(&f.text);
+    }
+    f.entry = f.text.starts_with("#!")
+        || (f.lang.name == "Python" && f.path.ends_with("__main__.py"))
+        || (!f.lang.entry_re.is_empty() && f.lang.entry_re.iter().all(|p| Regex::new(p).unwrap().is_match(&f.bare)));
+    imports(f);
+    symbols(f);
+}
+
+fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
+    static GUARD: LazyLock<Regex> = LazyLock::new(|| {
+        rx(r#"^\s*(?:if|unless)\s*\(?\s*(?:__name__\s*==\s*['"]__main__['"]|['"]__main__['"]\s*==\s*__name__|__FILE__\s*==\s*\$(?:0|PROGRAM_NAME)|\$(?:0|PROGRAM_NAME)\s*==\s*__FILE__)"#)
+    });
+    let mut parser = Parser::new();
+    if parser.set_language(&g.language).is_err() {
+        return;
+    }
+    let Some(tree) = parser.parse(src, None) else { return };
+    let names = g.query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&g.query, tree.root_node(), src.as_bytes());
+    let mut defs: Vec<Def> = vec![];
+    let mut seen_defs = HashSet::new();
+    let mut raw_calls: Vec<(Node, Node)> = vec![];
+    let mut refs: Vec<Node> = vec![];
+    let mut comments: Vec<(usize, usize)> = vec![];
+    let mut strings: Vec<(usize, usize)> = vec![];
+    let docstrings = !f.lang.header_comments;
+    if docstrings {
+        f.doc = docstring(tree.root_node(), src);
+    }
+    while let Some(m) = matches.next() {
+        let cap = |want: &str| m.captures().iter().find(|c| names[c.index as usize] == want).map(|c| c.node);
+        let main = names[m.captures().iter().map(|c| c.index as usize).find(|&i| {
+            matches!(names[i], "class" | "type" | "impl" | "func" | "call" | "ref" | "guard" | "comment" | "doc" | "string")
+        }).unwrap_or(0)];
+        let Some(node) = cap(main) else { continue };
+        match main {
+            "class" | "type" | "impl" | "func" => {
+                let Some(name) = cap("name") else { continue };
+                let kind = match main { "class" => Kind::Class, "type" => Kind::Type, "impl" => Kind::Impl, _ => Kind::Func };
+                if !seen_defs.insert((node.start_byte(), node.end_byte(), main)) {
+                    continue;
+                }
+                let head = head_of(node);
+                let body = node.child_by_field_name("body").map(|b| b.start_byte()).unwrap_or(node.end_byte());
+                let route = if kind == Kind::Func { decorator_route(&src[head..name.start_byte()]) } else { None };
+                defs.push(Def {
+                    name: clean_name(&src[name.byte_range()]),
+                    kind,
+                    start: node.start_byte(),
+                    end: node.end_byte(),
+                    line: node.start_position().row + 1,
+                    parent: None,
+                    owner: cap("owner").map(|o| clean_name(&src[o.byte_range()])),
+                    bases: if kind == Kind::Class { bases_of(&src[name.end_byte()..body.max(name.end_byte())]) } else { vec![] },
+                    sig: if kind == Kind::Func { signature(src, name.end_byte(), true) } else { String::new() },
+                    doc: if docstrings { docstring(node, src) } else { String::new() },
+                    route,
+                    io: vec![],
+                });
+                // a decorated / annotated definition is described from its first decorator line
+                if head < node.start_byte() {
+                    defs.last_mut().unwrap().start = head;
+                }
+            }
+            "call" => {
+                if let Some(callee) = cap("callee") {
+                    raw_calls.push((node, callee));
+                }
+            }
+            "ref" => refs.push(node),
+            "guard" => {
+                let text = &src[node.byte_range()];
+                if GUARD.is_match(text) {
+                    let first = text.lines().next().unwrap_or("").trim().trim_end_matches(':').to_string();
+                    defs.push(Def {
+                        name: first, kind: Kind::Main, start: node.start_byte(), end: node.end_byte(),
+                        line: node.start_position().row + 1, parent: None, owner: None, bases: vec![], sig: String::new(),
+                        doc: String::new(), route: None, io: vec![],
+                    });
+                }
+            }
+            "comment" | "doc" => comments.push((node.start_byte(), node.end_byte())),
+            "string" => {
+                let t = &src[node.byte_range()];
+                // "$1" in a regex replacement is text; in a shell script it is an argument
+                let mut w = node.walk();
+                let expands = node.named_children(&mut w).any(|k| k.kind().contains("expansion"));
+                let placeholder = (t.contains('$') || t.contains('%')) && !expands;
+                if node.end_byte() - node.start_byte() >= 6 || t.contains('\n') || placeholder {
+                    strings.push((node.start_byte() + 1, node.end_byte().saturating_sub(1)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // nesting: each definition's parent is the innermost one around it (index 0 is the file itself)
+    defs.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    let mut stack: Vec<usize> = vec![0];
+    for d in defs {
+        while stack.len() > 1 && f.defs[*stack.last().unwrap()].end <= d.start {
+            stack.pop();
+        }
+        let i = f.defs.len();
+        let parent = *stack.last().unwrap();
+        let mut d = d;
+        d.parent = Some(parent);
+        let p = &f.defs[parent];
+        if d.owner.is_none() && d.kind == Kind::Func && matches!(p.kind, Kind::Class | Kind::Type | Kind::Impl) {
+            d.owner = Some(p.name.clone());
+        }
+        f.defs.push(d);
+        stack.push(i);
+    }
+
+    let mut bare = f.text.clone();
+    if f.lang.script_blocks {
+        bare = src.to_string();
+    }
+    for &(a, b) in &comments {
+        blank(&mut bare, a, b);
+    }
+    let mut code = bare.clone();
+    for &(a, b) in &strings {
+        blank(&mut code, a, b);
+    }
+    if f.lang.script_blocks {
+        // the template is not code, but the paths and names it mentions still link files
+        bare = f.text.clone();
+        for &(a, b) in &comments {
+            blank(&mut bare, a, b);
+        }
+    }
+    f.bare = bare;
+    f.code = code;
+
+    let innermost = |at: usize, defs: &[Def]| -> usize {
+        let mut best = 0;
+        for (i, d) in defs.iter().enumerate().skip(1) {
+            if d.start <= at && at < d.end && (d.kind == Kind::Func || d.kind == Kind::Main) {
+                best = i;
+            }
+        }
+        best
+    };
+    let mut seen_calls = HashSet::new();
+    for (node, callee) in raw_calls {
+        if !seen_calls.insert(callee.start_byte()) {
+            continue;
+        }
+        let name = clean_name(&src[callee.byte_range()]);
+        let recv = src[node.start_byte()..callee.start_byte()].trim();
+        let recv = recv.trim_end_matches(['.', '?', '!', '&', ':', '-', '>']).trim();
+        let recv = recv.trim_start_matches('<'); // <Nav/>
+        let recv = if recv == "new" { "" } else { recv };
+        let at = callee.start_byte();
+        let def = innermost(at, &f.defs);
+        let line = callee.start_position().row + 1;
+        if ROUTE_CALLS.contains(&name.as_str()) {
+            static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](/[^'"`]*)['"`]"#));
+            if let Some(c) = FIRST.captures(&src[callee.end_byte()..node.end_byte()]) {
+                let verb = if name.len() <= 6 && name != "handle" && name != "route" { name.to_uppercase() } else { "ANY".into() };
+                let verb = if verb == "ALL" { "ANY".into() } else { verb };
+                f.routes.push(Route { verb, path: c[1].to_string(), line, at: node.start_byte(), end: node.end_byte(), def });
+            }
+        }
+        f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), line, def, is_ref: false });
+    }
+    for node in refs {
+        if seen_calls.contains(&node.start_byte()) {
+            continue;
+        }
+        let at = node.start_byte();
+        let text = &src[node.byte_range()];
+        let (recv, name) = text.rsplit_once('.').unwrap_or(("", text)); // items.router
+        f.calls.push(Call {
+            name: name.to_string(), recv: recv.to_string(), at, end: node.end_byte(),
+            line: node.start_position().row + 1, def: innermost(at, &f.defs), is_ref: true,
+        });
+    }
+    f.calls.sort_by_key(|c| c.at);
+}
+
+/// Import specs, read from the comment-free text with each language's import syntax.
+fn imports(f: &mut File) {
+    static PY_FROM: LazyLock<Regex> = LazyLock::new(|| rx(r"(?m)^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]+)"));
+    static PY_IMPORT: LazyLock<Regex> = LazyLock::new(|| {
+        rx(r"(?m)^[ \t]*import[ \t]+([\w.]+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*[\w.]+(?:[ \t]+as[ \t]+\w+)?)*)")
+    });
+    static HASH_COMMENT: LazyLock<Regex> = LazyLock::new(|| rx(r"#[^\n]*"));
+    static JS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        vec![
+            rx(r#"\bimport\s+(?:[^'"();]*?\sfrom\s+)?['"]([^'"\n]+)['"]"#),
+            rx(r#"\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s*from\s*['"]([^'"\n]+)['"]"#),
+            rx(r#"\brequire\(\s*['"]([^'"\n]+)['"]\s*\)"#),
+            rx(r#"\bimport\(\s*['"]([^'"\n]+)['"]\s*\)"#),
+        ]
+    });
+    static GO_BLOCK: LazyLock<Regex> = LazyLock::new(|| rx(r"(?ms)^import\s*\((.*?)^\)"));
+    static GO_STR: LazyLock<Regex> = LazyLock::new(|| rx(r#""([^"]+)""#));
+    static GO_ONE: LazyLock<Regex> = LazyLock::new(|| rx(r#"(?m)^import\s+(?:\w+\s+)?"([^"]+)""#));
+    static RS_MOD: LazyLock<Regex> = LazyLock::new(|| rx(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;"));
+    static RS_USE: LazyLock<Regex> = LazyLock::new(|| rx(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([\w:]+)"));
+    static JVM_PKG: LazyLock<Regex> = LazyLock::new(|| rx(r"(?m)^\s*package\s+([\w.]+)"));
+    static JVM_IMPORT: LazyLock<Regex> = LazyLock::new(|| rx(r"(?m)^\s*import\s+(?:static\s+)?([\w.]+)"));
+    static C_INCLUDE: LazyLock<Regex> = LazyLock::new(|| rx(r#"(?m)^\s*#\s*include\s+"([^"]+)""#));
+    let t = &f.bare;
+    match f.lang.resolver {
+        Resolver::Python => {
+            for c in PY_FROM.captures_iter(t) {
+                let body = HASH_COMMENT.replace_all(&c[3], "");
+                let names: Vec<String> = body
+                    .trim_matches(|ch: char| "() \t\n".contains(ch))
+                    .split(',')
+                    .filter_map(|n| n.split_whitespace().next().map(String::from))
+                    .collect();
+                f.py_imports.push(PyImport { level: c[1].len(), module: c[2].to_string(), names, is_from: true });
+            }
+            for c in PY_IMPORT.captures_iter(t) {
+                for part in c[1].split(',') {
+                    let ws: Vec<&str> = part.split_whitespace().collect();
+                    if let Some(m) = ws.first() {
+                        f.py_imports.push(PyImport { level: 0, module: m.to_string(), names: vec![], is_from: false });
+                        f.aliases.push(if ws.len() == 3 { ws[2].to_string() } else { m.split('.').next().unwrap_or(m).to_string() });
+                    }
+                }
+            }
+            for c in PY_FROM.captures_iter(t) {
+                let body = HASH_COMMENT.replace_all(&c[3], "");
+                for n in body.trim_matches(|ch: char| "() \t\n".contains(ch)).split(',') {
+                    let ws: Vec<&str> = n.split_whitespace().collect();
+                    if let Some(last) = ws.last() {
+                        f.aliases.push(last.to_string());
+                    }
+                }
+            }
+        }
+        Resolver::Js => {
+            static BIND: LazyLock<Regex> = LazyLock::new(|| {
+                rx(r#"\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s*(?:,|\s+from\b)|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\("#)
+            });
+            f.imports = JS.iter().flat_map(|re| re.captures_iter(t).map(|c| c[1].to_string())).collect();
+            f.aliases = BIND.captures_iter(t).filter_map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_string())).collect();
+            static SPEC: LazyLock<Regex> = LazyLock::new(|| {
+                rx(r#"\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\}\s*)?from\s*['"]([^'"\n]+)['"]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"\n]+)['"]\s*\)"#)
+            });
+            f.bindings = SPEC.captures_iter(t)
+                .filter_map(|c| match (c.get(1).or(c.get(3)), c.get(2).or(c.get(4))) {
+                    (Some(a), Some(s)) => Some((a.as_str().to_string(), s.as_str().to_string())),
+                    _ => None,
+                })
+                .collect();
+        }
+        Resolver::Go => {
+            static GO_SPEC: LazyLock<Regex> = LazyLock::new(|| rx(r#"(?m)^\s*(?:import\s+)?(\w+\s+)?"([^"]+)""#));
+            for b in GO_BLOCK.captures_iter(t) {
+                f.imports.extend(GO_STR.captures_iter(&b[1]).map(|c| c[1].to_string()));
+                for c in GO_SPEC.captures_iter(&b[1]) {
+                    f.aliases.push(c.get(1).map(|a| a.as_str().trim().to_string()).unwrap_or_else(|| c[2].rsplit('/').next().unwrap_or("").to_string()));
+                }
+            }
+            for c in GO_ONE.captures_iter(t) {
+                f.imports.push(c[1].to_string());
+                f.aliases.push(c[1].rsplit('/').next().unwrap_or("").to_string());
+            }
+        }
+        Resolver::Rust => {
+            static RS_USE_FULL: LazyLock<Regex> = LazyLock::new(|| rx(r"(?ms)^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);"));
+            static RS_BIND: LazyLock<Regex> = LazyLock::new(|| rx(r"(\w+)(?:\s*::\s*\{([^{}]*)\})?(?:\s+as\s+(\w+))?\s*(?:,|\}|$)"));
+            f.mods = RS_MOD.captures_iter(t).map(|c| c[1].to_string()).collect();
+            f.imports = RS_USE.captures_iter(t).map(|c| c[1].trim_matches(':').to_string()).collect();
+            f.aliases = f.mods.clone();
+            for u in RS_USE_FULL.captures_iter(t) {
+                // use crate::graph::{self, Gid} binds graph; use a::b as c binds c
+                for c in RS_BIND.captures_iter(&u[1]) {
+                    let name = c.get(3).map(|m| m.as_str()).unwrap_or(&c[1]);
+                    if c.get(2).is_some_and(|inner| inner.as_str().split(',').any(|x| x.trim() == "self")) {
+                        f.aliases.push(c[1].to_string());
+                    }
+                    if name != "self" && name != "crate" && name != "super" {
+                        f.aliases.push(name.to_string());
+                    }
+                }
+            }
+        }
+        Resolver::Jvm => {
+            f.pkg = JVM_PKG.captures(t).map(|c| c[1].to_string()).unwrap_or_default();
+            f.imports = JVM_IMPORT.captures_iter(t).map(|c| c[1].trim_end_matches('.').to_string()).collect();
+            f.aliases = f.imports.iter().map(|i| i.rsplit('.').next().unwrap_or("").to_string()).collect();
+        }
+        Resolver::C => f.imports = C_INCLUDE.captures_iter(t).map(|c| c[1].to_string()).collect(),
+        Resolver::None => {}
+    }
+}
+
+/// What the file page lists: its classes (with their methods), top-level functions and web endpoints.
+fn symbols(f: &mut File) {
+    let jsx = f.path.ends_with(".jsx") || f.path.ends_with(".tsx");
+    let in_func = |i: usize| {
+        let mut p = f.defs[i].parent;
+        while let Some(j) = p {
+            if f.defs[j].kind == Kind::Func {
+                return true;
+            }
+            p = f.defs[j].parent;
+        }
+        false
+    };
+    let mut out = vec![];
+    for (i, d) in f.defs.iter().enumerate().skip(1) {
+        let top_func = d.kind == Kind::Func && d.parent == Some(0);
+        let container = matches!(d.kind, Kind::Class | Kind::Type) && !in_func(i);
+        if !(top_func || container) {
+            continue;
+        }
+        let (k, n, sig) = match (d.kind, &d.route) {
+            (Kind::Func, Some((verb, path))) if !f.lang.regex_routes => ("route", path.clone(), verb.clone()),
+            (Kind::Func, _) if jsx && d.name.starts_with(|c: char| c.is_ascii_uppercase()) => ("component", d.name.clone(), d.sig.clone()),
+            (Kind::Func, _) => ("function", d.name.clone(), d.owner.as_ref().map(|o| format!("on {o}")).unwrap_or_else(|| d.sig.clone())),
+            (Kind::Type, _) => ("type", d.name.clone(), String::new()),
+            _ => ("class", d.name.clone(), if d.bases.is_empty() { String::new() } else { format!("({})", d.bases.join(", ")) }),
+        };
+        let members = (d.kind == Kind::Class).then(|| {
+            let mut ms: Vec<String> = f.defs.iter()
+                .filter(|m| m.kind == Kind::Func && m.owner.as_deref() == Some(d.name.as_str()) && !m.name.starts_with('_'))
+                .map(|m| m.name.clone())
+                .collect();
+            ms.dedup();
+            ms.truncate(12);
+            ms
+        });
+        out.push(Symbol { k, n, sig, doc: d.doc.clone(), line: d.line, members });
+    }
+    if f.lang.regex_routes {
+        for re in ROUTE_RES.iter() {
+            for c in re.captures_iter(&f.bare) {
+                let (verb, path) = if c.len() == 3 { (c[1].to_uppercase(), c[2].to_string()) } else { ("ANY".into(), c[1].to_string()) };
+                let whole = c.get(0).unwrap();
+                if path.starts_with('/') || whole.as_str().contains("->") || whole.as_str().contains("::") {
+                    out.push(Symbol { k: "route", n: path, sig: verb, doc: String::new(), line: line_of(&f.text, whole.start()), members: None });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|s| s.line);
+    let go = f.lang.name == "Go";
+    out.sort_by_key(|s| (s.k != "route" && s.n.starts_with('_')) || (go && s.k != "route" && !s.n.starts_with(|c: char| c.is_uppercase())));
+    out.truncate(60);
+    f.symbols = out;
+}

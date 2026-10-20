@@ -1,18 +1,19 @@
 #!/bin/sh
 # repoatlas installer.
 #
-# Puts ONE self-contained file called `repoatlas` on your PATH. No sudo, nothing else is touched,
+# Puts ONE self-contained program called `repoatlas` on your PATH. No sudo, nothing else is touched,
 # and once it is installed you can delete everything you downloaded.
 #
 #   curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh
 #   ./install.sh                  from a clone of the repo (builds from the clone)
 #   ./install.sh --uninstall      remove it again
 #
-# Needs: Python 3.8+ (repoatlas is a Python program) and curl or wget (not needed from a clone).
+# Needs: curl or wget. Building from source (from a clone, or for a machine with no ready-made file) needs
+# Rust's cargo: https://rustup.rs
 #
 # Optional environment variables:
 #   REPOATLAS_INSTALL_DIR      where to put the file             (default: ~/.local/bin)
-#   REPOATLAS_VERSION          release tag such as v1.0.0        (default: the latest release)
+#   REPOATLAS_VERSION          release tag such as v2.0.0        (default: the latest release)
 #   REPOATLAS_NO_MODIFY_PATH=1 do not edit any shell startup file
 #   REPOATLAS_REPO, REPOATLAS_BASE_URL, REPOATLAS_REF   for forks, mirrors and testing
 
@@ -37,14 +38,14 @@ trap 'exit 130' INT TERM
 
 usage() {
   cat <<'EOF'
-repoatlas installer: puts one self-contained file called `repoatlas` on your PATH.
+repoatlas installer: puts one self-contained program called `repoatlas` on your PATH.
 
   install.sh                    install (or update)
   install.sh --uninstall        remove it again
   install.sh --no-modify-path   do not edit shell startup files
 
-Environment: REPOATLAS_INSTALL_DIR (default ~/.local/bin), REPOATLAS_VERSION (e.g. v1.0.0),
-REPOATLAS_NO_MODIFY_PATH=1. Needs Python 3.8+ and, unless run from a clone, curl or wget.
+Environment: REPOATLAS_INSTALL_DIR (default ~/.local/bin), REPOATLAS_VERSION (e.g. v2.0.0),
+REPOATLAS_NO_MODIFY_PATH=1. Needs curl or wget; building from source needs Rust's cargo.
 EOF
 }
 
@@ -72,25 +73,35 @@ if [ "$ACTION" = uninstall ]; then
   exit 0
 fi
 
-# ---------------------------------------------------------------- requirements
-have python3 || die "Python 3 is required because repoatlas is a Python program.
-  macOS:           xcode-select --install     (or: brew install python)
-  Debian/Ubuntu:   sudo apt install python3
-  Fedora:          sudo dnf install python3"
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null \
-  || die "Python 3.8 or newer is required, found: $(python3 -V 2>&1)"
-
 fetch() {  # fetch URL DEST
   if have curl; then curl -fsSL "$1" -o "$2"; else wget -q -O "$2" "$1"; fi
+}
+
+# the release file made for this machine: repoatlas-macos-aarch64, repoatlas-linux-x86_64 ...
+platform() {
+  case "$(uname -s)" in
+    Darwin) os=macos ;;
+    Linux) os=linux ;;
+    *) os=$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x86_64 ;;
+    arm64|aarch64) arch=aarch64 ;;
+    *) arch=$(uname -m) ;;
+  esac
+  printf '%s-%s' "$os" "$arch"
 }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/repoatlas-install.XXXXXX")
 
 # ---------------------------------------------------------------- get the file
 build_from() {  # build_from SOURCE_DIR
-  say "Building repoatlas from source..."
-  ( cd "$1" && python3 scripts/build_binary.py >/dev/null ) || die "the build failed."
-  cp "$1/dist/$NAME" "$TMP/$NAME"
+  have cargo || die "building repoatlas from source needs Rust's cargo, which is not installed.
+  Install Rust (one command, no sudo):   curl --proto '=https' -sSf https://sh.rustup.rs | sh
+  then open a new terminal and run this installer again."
+  say "Building repoatlas from source (a minute or two the first time)..."
+  ( cd "$1" && cargo build --release --locked --quiet ) || die "the build failed."
+  cp "${CARGO_TARGET_DIR:-$1/target}/release/$NAME" "$TMP/$NAME"
 }
 
 verify_checksum() {
@@ -102,27 +113,30 @@ verify_checksum() {
   [ "$got" = "$want" ] || die "the download is corrupted (checksum mismatch). Nothing was installed."
 }
 
+is_source() { [ -f "$1/Cargo.toml" ] && [ -f "$1/src/main.rs" ]; }
+
 SELF_DIR=""
 if [ -f "$0" ]; then SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SELF_DIR=""; fi
 
-if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/scripts/build_binary.py" ] && [ -d "$SELF_DIR/repoatlas" ]; then
+if [ -n "$SELF_DIR" ] && is_source "$SELF_DIR"; then
   FROM_CLONE=1
   build_from "$SELF_DIR"
 else
   FROM_CLONE=0
   have curl || have wget || die "curl or wget is needed to download repoatlas."
   if [ "$VERSION" = latest ]; then REL="$BASE/$REPO/releases/latest/download"; else REL="$BASE/$REPO/releases/download/$VERSION"; fi
-  say "Downloading repoatlas..."
-  if fetch "$REL/$NAME" "$TMP/$NAME" 2>/dev/null; then
-    if fetch "$REL/$NAME.sha256" "$TMP/$NAME.sha256" 2>/dev/null; then verify_checksum; fi
+  ASSET="$NAME-$(platform)"
+  say "Downloading repoatlas ($ASSET)..."
+  if fetch "$REL/$ASSET" "$TMP/$NAME" 2>/dev/null; then
+    if fetch "$REL/$ASSET.sha256" "$TMP/$NAME.sha256" 2>/dev/null; then verify_checksum; fi
   else
-    # no release published yet: build the current source instead
-    say "No release found, building from source..."
+    # no release published yet, or none made for this machine: build the current source instead
+    say "No ready-made $ASSET found, building from source..."
     fetch "$BASE/$REPO/archive/refs/heads/$REF.tar.gz" "$TMP/src.tar.gz" \
       || die "could not download from $BASE/$REPO (is the repository public and the name right?)"
     tar -xzf "$TMP/src.tar.gz" -C "$TMP"
     SRC=""
-    for d in "$TMP"/*/; do [ -f "${d}scripts/build_binary.py" ] && SRC=${d%/}; done
+    for d in "$TMP"/*/; do is_source "${d%/}" && SRC=${d%/}; done
     [ -n "$SRC" ] || die "the downloaded source is not what I expected."
     build_from "$SRC"
   fi
@@ -176,7 +190,7 @@ else
   NEED_NEW_SHELL=1
 fi
 
-# another repoatlas earlier on the PATH (pipx, Homebrew...) would hide this one
+# another repoatlas earlier on the PATH (Homebrew, cargo install...) would hide this one
 other=$(command -v "$NAME" 2>/dev/null || true)
 if [ -n "$other" ] && [ "$other" != "$DIR/$NAME" ]; then
   warn "note: $other comes first on your PATH and will run instead of the one just installed."
@@ -192,5 +206,5 @@ else
 fi
 if [ "$FROM_CLONE" = 1 ]; then
   say ""
-  say "repoatlas is one self-contained file, so you can delete the folder you installed from."
+  say "repoatlas is one self-contained program, so you can delete the folder you installed from."
 fi
