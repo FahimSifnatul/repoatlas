@@ -37,3 +37,16 @@ pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// call names that register a web endpoint: app.get("/x", handler), mux.HandleFunc("/x", h)
 pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
     "GET", "POST", "PUT", "DELETE", "PATCH"];
+
+/// how a route's handler is written, the last argument of the registering call: the class (if any) and the function.
+/// `[UserController::class, 'index']`, `'UserController@index'`, `ctrl.profile`, `list_items`
+pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        rx(r#"^\[\s*(?:[\w\\]+\\)?(?P<class>\w+)(?:::class|\.class)?\s*,\s*['"](?P<func>\w+)['"]\s*\]$"#),
+        rx(r#"^['"](?:[\w\\]+\\)?(?P<class>\w+)@(?P<func>\w+)['"]$"#),
+        rx(r"^(?:[\w$]+(?:\.|::))*(?P<class>[\w$]+)(?:\.|::)(?P<func>[\w$]+)$"),
+        rx(r"^(?P<func>[\w$]+)$"),
+    ]
+});
+/// a handler wrapped in a call that names the verb: `get(list_items)`
+pub static HANDLER_WRAP: LazyLock<Regex> = LazyLock::new(|| rx(r"^(?P<wrap>\w+)\(\s*(?P<inner>[^()]+?)\s*\)$"));

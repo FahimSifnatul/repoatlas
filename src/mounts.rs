@@ -30,7 +30,7 @@ pub struct Mounts {
 }
 
 /// The arguments of the call that `text` starts with (`include_router(a, prefix="/x")`), split at top-level commas.
-fn args_of(text: &str) -> Vec<String> {
+pub(crate) fn args_of(text: &str) -> Vec<String> {
     let Some(open) = text.find('(') else { return vec![] };
     if text[..open].contains(['\n', ';', '{', '=', ' ']) {
         return vec![];

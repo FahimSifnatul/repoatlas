@@ -952,3 +952,50 @@ fn rule_move_changes_nothing() {
     let all: Vec<Vec<String>> = [&py, &js, &go].iter().map(|d| route_paths(&procs(d)[0])).collect();
     assert_eq!(all, [vec!["GET /ping", "GET|POST /old"], vec!["GET /users", "POST /users"], vec!["ANY /health"]]);
 }
+
+// ---------------------------------------------------------------- route handlers
+
+/// the name of the first step of the journey of the route whose path is `path`
+fn route_first(d: &Value, path: &str) -> Option<String> {
+    let r = procs(d).iter().flat_map(|p| p["routes"].as_array().cloned().unwrap_or_default()).find(|r| r["path"] == path)?;
+    r["steps"].as_array()?.first().map(|s| s["n"].as_str().unwrap().to_string())
+}
+
+#[test]
+fn go_122_patterns() {
+    let d = analyze(&[(
+        "main.go",
+        "package main\n\nimport \"net/http\"\n\nfunc main() {\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"GET /users/{id}\", getUser)\n\thttp.ListenAndServe(\":80\", mux)\n}\n\nfunc getUser(w http.ResponseWriter, r *http.Request) {}\n",
+    )]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /users/{id}"]);
+    assert_eq!(route_first(&d, "/users/{id}").as_deref(), Some("getUser()"));
+}
+
+#[test]
+fn handler_forms() {
+    let axum = analyze(&[(
+        "src/main.rs",
+        "use axum::{routing::get, Router};\n\nfn main() {\n    let app = Router::new().route(\"/items\", get(list_items));\n    axum::serve(listener, app);\n}\n\nfn list_items() {}\n",
+    )]);
+    assert_eq!(route_first(&axum, "/items").as_deref(), Some("list_items()"));
+    let laravel = analyze(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../routes/web.php';\n"),
+        ("routes/web.php", "<?php\nRoute::get('/users', [UserController::class, 'index']);\nRoute::post('/login', 'AuthController@login');\n"),
+        ("app/Http/Controllers/UserController.php", "<?php\nclass UserController {\n    public function index() {}\n}\n"),
+        ("app/Http/Controllers/AuthController.php", "<?php\nclass AuthController {\n    public function login() {}\n}\n"),
+    ]);
+    assert_eq!(route_first(&laravel, "/users").as_deref(), Some("UserController.index()"));
+    assert_eq!(route_first(&laravel, "/login").as_deref(), Some("AuthController.login()"));
+    let js = analyze(&[
+        ("server.js", "const express = require('express')\nconst ctrl = require('./ctrl')\nconst app = express()\napp.get('/p', ctrl.profile)\napp.listen(3000)\n"),
+        ("ctrl.js", "exports.profile = function profile() {}\n"),
+    ]);
+    assert_eq!(route_first(&js, "/p").as_deref(), Some("profile()"));
+}
+
+#[test]
+fn unknown_handler_is_harmless() {
+    let d = analyze(&[("server.js", "const express = require('express')\nconst app = express()\napp.get('/x', missing)\napp.listen(3000)\n")]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /x"]);
+    assert_eq!(route_first(&d, "/x"), None);
+}

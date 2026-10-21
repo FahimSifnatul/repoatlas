@@ -759,6 +759,21 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                         },
                     };
                     if hs.is_empty() {
+                        // `[UserController::class, 'index']`: the one method of that class (or module) with that name
+                        if let Some((class, func)) = crate::parse::handler_of(&r.handler).filter(|(c, _)| !c.is_empty()) {
+                            let mut named = files.iter().enumerate().flat_map(|(i, g)| {
+                                let module = crate::resolve::basename(&g.path).split('.').next().unwrap_or("").to_string();
+                                let (class, func) = (class.clone(), func.clone());
+                                g.defs.iter().enumerate()
+                                    .filter(move |(_, d)| d.kind == Kind::Func && d.name == func && (d.owner.as_deref() == Some(class.as_str()) || module == class))
+                                    .map(move |(j, _)| (i, j))
+                            });
+                            if let (Some(g), None) = (named.next(), named.next()) {
+                                hs.push(g);
+                            }
+                        }
+                    }
+                    if hs.is_empty() {
                         // `(req, res) => {...}` written in place: the calls inside it
                         for (ci, c) in f.calls.iter().enumerate() {
                             if c.at > r.at && c.at < r.end && c.def == r.def {

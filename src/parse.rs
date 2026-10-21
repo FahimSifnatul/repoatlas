@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{DECORATOR_ROUTES, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_WRAP, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -77,6 +77,20 @@ pub struct Route {
     pub def: usize,
     /// what it is called on: `router` in `router.get("/x", h)`
     pub recv: String,
+    /// how the handler is written: `list_items`, `[UserController::class, 'index']` ("" when none is given)
+    pub handler: String,
+}
+
+/// (class, function) a handler expression names; the class is "" when only a function is named
+pub fn handler_of(expr: &str) -> Option<(String, String)> {
+    let mut expr = expr.trim();
+    if let Some(c) = HANDLER_WRAP.captures(expr) {
+        expr = c.name("inner").map_or("", |m| m.as_str());
+    }
+    HANDLER_FORMS.iter().find_map(|re| {
+        let c = re.captures(expr)?;
+        Some((c.name("class").map_or("", |m| m.as_str()).to_string(), c["func"].to_string()))
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -540,11 +554,24 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
         let def = innermost(at, &f.defs);
         let line = callee.start_position().row + 1;
         if ROUTE_CALLS.contains(&name.as_str()) {
-            static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](/[^'"`]*)['"`]"#));
+            static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
             if let Some(c) = FIRST.captures(&src[callee.end_byte()..node.end_byte()]) {
-                let verb = if name.len() <= 6 && name != "handle" && name != "route" { name.to_uppercase() } else { "ANY".into() };
+                let verb = if let Some(v) = c.get(1) {
+                    v.as_str().to_string() // "GET /users/{id}": the verb is written in the pattern
+                } else if name.len() <= 6 && name != "handle" && name != "route" {
+                    name.to_uppercase()
+                } else {
+                    "ANY".into()
+                };
                 let verb = if verb == "ALL" { "ANY".into() } else { verb };
-                f.routes.push(Route { verb, path: c[1].to_string(), line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string() });
+                let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
+                let handler = if args.len() >= 2 { args[args.len() - 1].clone() } else { String::new() };
+                // `.route("/x", get(list))`: the verb is the name of the wrapping call
+                let verb = match HANDLER_WRAP.captures(&handler).map(|w| w["wrap"].to_uppercase()) {
+                    Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,
+                    _ => verb,
+                };
+                f.routes.push(Route { verb, path: c[2].to_string(), line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
             }
         }
         f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(), line, def, is_ref: false, cond: cond_of(node) });
