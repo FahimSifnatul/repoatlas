@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{routes_file, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_WRAP, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, CLASS_PREFIX, INCLUDE, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_WRAP, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -570,7 +570,11 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,
                     _ => verb,
                 };
-                f.routes.push(Route { verb, path, line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
+                if INCLUDE.is_match(&handler) {
+                    // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
+                } else {
+                    f.routes.push(Route { verb, path, line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
+                }
             }
         }
         f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(), line, def, is_ref: false, cond: cond_of(node) });

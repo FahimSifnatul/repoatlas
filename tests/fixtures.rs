@@ -1042,3 +1042,46 @@ fn a_call_named_like_a_route_outside_a_routes_file_is_not_one() {
     let all: Vec<String> = d["nodes"].as_object().unwrap().values().flat_map(|n| n["symbols"].as_array().cloned().unwrap_or_default()).filter(|s| s["k"] == "route").map(|s| s["n"].as_str().unwrap().to_string()).collect();
     assert_eq!(all, ["users"]);
 }
+
+// ---------------------------------------------------------------- includes and closure groups
+
+#[test]
+fn django_include() {
+    let d = analyze(&[
+        ("main.py", "from config import urls\nfrom shop import urls as shop_urls\n\nif __name__ == '__main__':\n    urls.x\n"),
+        ("config/__init__.py", ""),
+        ("config/urls.py", "from django.urls import path, include\n\nurlpatterns = [path(\"api/\", include(\"shop.urls\"))]\n"),
+        ("shop/__init__.py", ""),
+        ("shop/urls.py", "from django.urls import path\nfrom shop import views\n\nurlpatterns = [path(\"items/\", views.items)]\n"),
+        ("shop/views.py", "def items():\n    return 1\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["ANY /api/items/"]); // the include itself is not a route
+}
+
+#[test]
+fn laravel_group() {
+    let d = analyze(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../routes/web.php';\n"),
+        ("routes/web.php", "<?php\nRoute::prefix('api')->group(function () {\n    Route::get('/users', 'U@index');\n});\nRoute::group(['prefix' => 'admin'], function () {\n    Route::get('/stats', 'U@stats');\n});\nRoute::get('/home', 'U@home');\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /admin/stats", "GET /api/users", "GET /home"]);
+}
+
+#[test]
+fn chi_route_group() {
+    let d = analyze(&[(
+        "main.go",
+        "package main\n\nimport \"net/http\"\n\nfunc main() {\n\tr := chi.NewRouter()\n\tr.Route(\"/v1\", func(r chi.Router) {\n\t\tr.Get(\"/x\", h)\n\t})\n\tr.Get(\"/top\", h)\n\thttp.ListenAndServe(\":80\", r)\n}\n\nfunc h(w http.ResponseWriter, r *http.Request) {}\n",
+    )]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /top", "GET /v1/x"]);
+}
+
+#[test]
+fn same_router_name_two_files() {
+    let d = analyze(&[
+        ("main.js", "const express = require('express')\nconst one = require('./one')\nconst two = require('./two')\nconst app = express()\napp.use('/one', one)\napp.use('/two', two)\napp.listen(3000)\n"),
+        ("one.js", "const { Router } = require('express')\nconst router = Router()\nrouter.get('/x', (req, res) => res.send(1))\nmodule.exports = router\n"),
+        ("two.js", "const { Router } = require('express')\nconst router = Router()\nrouter.get('/y', (req, res) => res.send(2))\nmodule.exports = router\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /one/x", "GET /two/y"]);
+}

@@ -39,7 +39,7 @@ pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 /// call names that register a web endpoint: app.get("/x", handler), mux.HandleFunc("/x", h)
 pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
-    "GET", "POST", "PUT", "DELETE", "PATCH"];
+    "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch"];
 
 /// how a route's handler is written, the last argument of the registering call: the class (if any) and the function.
 /// `[UserController::class, 'index']`, `'UserController@index'`, `ctrl.profile`, `list_items`
@@ -73,3 +73,13 @@ pub fn routes_file(path: &str) -> Option<&'static [&'static str]> {
         .find(|(dir, ending, _)| path.ends_with(ending) && (dir.is_empty() || path.starts_with(dir) || path.contains(&format!("/{dir}"))))
         .map(|(_, _, calls)| *calls)
 }
+
+/// a routes file handed to another routes file under a prefix: `path("api/", include("shop.urls"))`
+pub static INCLUDE: LazyLock<Regex> = LazyLock::new(|| rx(r#"^include\(\s*['"]([\w.]+)['"]"#));
+
+/// calls whose closure argument registers routes under a prefix, and where that prefix is written:
+/// first argument `r.Route("/v1", func(..) {..})`, the chain before it `Route::prefix('api')->group(..)`, an array `['prefix' => 'api']`
+pub const SCOPE_CALLS: &[&str] = &["Route", "group"];
+pub static SCOPE_FIRST_ARG: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\(\s*['"`]([^'"`]*)['"`]"#));
+pub static SCOPE_CHAIN: LazyLock<Regex> = LazyLock::new(|| rx(r#"\bprefix\s*\(\s*['"]([^'"]*)['"]\s*\)"#));
+pub static SCOPE_ARRAY: LazyLock<Regex> = LazyLock::new(|| rx(r#"['"]prefix['"]\s*=>\s*['"]([^'"]*)['"]"#));

@@ -11,7 +11,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::parse::File;
-use crate::rules::{GROUP_CALLS, MOUNT_CALLS};
+use crate::rules::{routes_file, GROUP_CALLS, MOUNT_CALLS, INCLUDE, SCOPE_ARRAY, SCOPE_CALLS, SCOPE_CHAIN, SCOPE_FIRST_ARG};
+use crate::tables::STEM;
 
 /// (file, name of the router object in it); the name `*` stands for every router a file builds
 type Key = (usize, String);
@@ -22,11 +23,20 @@ struct Edge {
     path: String,
 }
 
+/// routes written inside a closure that carries a prefix: (file, start, end, prefix)
+struct Scope {
+    file: usize,
+    from: usize,
+    to: usize,
+    path: String,
+}
+
 #[derive(Default)]
 pub struct Mounts {
     /// prefix a router carries itself: `APIRouter(prefix="/items")`
     own: HashMap<Key, String>,
     edges: Vec<Edge>,
+    scopes: Vec<Scope>,
 }
 
 /// The arguments of the call that `text` starts with (`include_router(a, prefix="/x")`), split at top-level commas.
@@ -188,6 +198,19 @@ fn mount_parent(f: &File, c: &crate::parse::Call) -> Option<String> {
     head.trim_end().ends_with("export default").then(|| "default".to_string())
 }
 
+/// The one file a dotted module name (`shop.urls`) is, wherever the project root is.
+fn module_file(files: &[File], dotted: &str) -> Option<usize> {
+    let stem = dotted.replace('.', "/");
+    let mut hits = files.iter().enumerate().filter(|(_, f)| {
+        let p = STEM.replace(&f.path, "");
+        p == stem || p.ends_with(&format!("/{stem}"))
+    });
+    match (hits.next(), hits.next()) {
+        (Some((i, _)), None) => Some(i),
+        _ => None,
+    }
+}
+
 pub fn build(files: &[File]) -> Mounts {
     static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?m)^[ \t]*(?:(?:export\s+)?(?:const|let|var|val)\s+)?([A-Za-z_]\w*)\s*(?::[^=\n]+)?:?=\s*([A-Za-z_][\w.]*)\(").unwrap()
@@ -226,6 +249,31 @@ pub fn build(files: &[File]) -> Mounts {
                 m.edges.push(Edge { parent, child, path: path.map(|p| ev.eval(&p)).unwrap_or_default() });
             }
         }
+        // a routes file handed to another under a prefix: `path("api/", include("shop.urls"))`
+        if let Some(calls) = routes_file(&f.path) {
+            for c in f.calls.iter().filter(|c| !c.is_ref && calls.contains(&c.name.as_str())) {
+                let args = args_of(&f.bare[c.at..c.end.min(f.bare.len())]);
+                let Some(module) = args.get(1).and_then(|a| INCLUDE.captures(a)) else { continue };
+                let (Some(child), Some(path)) = (module_file(files, &module[1]), args.first()) else { continue };
+                let path = ev.eval(path).trim_start_matches('^').trim_end_matches('$').to_string();
+                m.edges.push(Edge { parent: (fi, String::new()), child: (child, String::new()), path });
+            }
+        }
+        // routes written inside a closure that carries a prefix: `r.Route("/v1", func(r) {..})`, `Route::prefix('api')->group(function () {..})`
+        static CLOSURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfunction\b|\bfunc\b|\bfn\b|=>").unwrap());
+        for c in f.calls.iter().filter(|c| !c.is_ref && SCOPE_CALLS.contains(&c.name.as_str())) {
+            let end = c.end.min(f.bare.len());
+            let text = &f.bare[c.at..end];
+            let Some(open) = text.find('(') else { continue };
+            let args = &text[open..];
+            if !CLOSURE.is_match(args) {
+                continue;
+            }
+            let prefix = SCOPE_FIRST_ARG.captures(args).or_else(|| SCOPE_CHAIN.captures(&c.recv)).or_else(|| SCOPE_ARRAY.captures(args));
+            if let Some(p) = prefix {
+                m.scopes.push(Scope { file: fi, from: c.from, to: end, path: ev.eval(&format!("\"{}\"", &p[1])) });
+            }
+        }
     }
     m
 }
@@ -247,7 +295,7 @@ impl Mounts {
             return own;
         }
         let edge = self.edges.iter().find(|e| e.child == *key)
-            .or_else(|| self.edges.iter().find(|e| e.child.0 == key.0 && e.child.1 == "*" && e.parent != *key));
+            .or_else(|| self.edges.iter().find(|e| !key.1.is_empty() && e.child.0 == key.0 && e.child.1 == "*" && e.parent != *key));
         match edge {
             Some(e) => {
                 let up = self.total(&e.parent, depth + 1);
@@ -260,10 +308,18 @@ impl Mounts {
     /// The prefix of every route registered on `recv` in file `fi` ("" when it is not mounted anywhere).
     pub fn prefix(&self, fi: usize, recv: &str) -> String {
         let var = recv.rsplit('.').next().unwrap_or(recv);
-        if var.is_empty() {
-            return String::new();
-        }
         let p = self.total(&(fi, var.to_string()), 0);
+        if p == "/" { String::new() } else { p }
+    }
+
+    /// `prefix`, then the prefixes of the closures the route at byte `at` is written in
+    pub fn prefix_at(&self, fi: usize, at: usize, recv: &str) -> String {
+        let up = self.prefix(fi, recv);
+        let mut inner: Vec<&Scope> = self.scopes.iter().filter(|s| s.file == fi && s.from <= at && at < s.to).collect();
+        inner.sort_by_key(|s| s.from);
+        let mut parts: Vec<&str> = vec![&up];
+        parts.extend(inner.iter().map(|s| s.path.as_str()));
+        let p = join_path(&parts);
         if p == "/" { String::new() } else { p }
     }
 }

@@ -716,14 +716,14 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                 let f = &files[fi];
                 let mut found: Vec<(String, String, usize, Vec<Gid>, Vec<Gid>)> = vec![];
                 // the full path: the prefixes of the routers it is mounted under, the class it is written in, then its own
-                let full = |recv: &str, class: &str, path: &str| -> String {
-                    let up = mounts.prefix(fi, recv);
+                let full = |recv: &str, at: usize, class: &str, path: &str| -> String {
+                    let up = mounts.prefix_at(fi, at, recv);
                     if up.is_empty() && class.is_empty() { path.to_string() } else { crate::mounts::join_path(&[&up, class, path]) }
                 };
                 for (di, d) in f.defs.iter().enumerate().filter(|(_, d)| d.kind == Kind::Func) {
                     if let Some((verb, path)) = &d.route {
                         let class = d.parent.map(|p| f.defs[p].prefix.as_str()).unwrap_or("");
-                        found.push((verb.clone(), full(&d.route_on, class, path), d.line, vec![(fi, di)], vec![]));
+                        found.push((verb.clone(), full(&d.route_on, d.start, class, path), d.line, vec![(fi, di)], vec![]));
                     }
                 }
                 for r in &f.routes {
@@ -785,7 +785,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                             }
                         }
                     }
-                    found.push((r.verb.clone(), full(&r.recv, "", &r.path), r.line, hs, pre));
+                    found.push((r.verb.clone(), full(&r.recv, r.at, "", &r.path), r.line, hs, pre));
                 }
                 for (verb, path, line, hs, pre) in found {
                     if routes.len() >= MAX_ROUTES {
