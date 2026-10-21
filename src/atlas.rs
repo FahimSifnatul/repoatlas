@@ -19,6 +19,7 @@ use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
 use crate::parse::{self, File, Kind};
 use crate::resolve::{basename, dirname, Project};
+use crate::rules::VERB_METHODS;
 use crate::tables::{cat_of, short as layer_short, toks, ENTRY_STEMS, EXT_CATS, IO, LAYERS, TOKEN_LAYER, WRAPPERS};
 use crate::text::read_para;
 
@@ -111,10 +112,10 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     // layers first: repo code never calls into a test file's helpers
     let top_dirs: HashSet<String> = files.iter().filter(|f| f.path.contains('/')).map(|f| f.path.split('/').next().unwrap().to_lowercase()).collect();
     let fullstack = ["client", "frontend", "web"].iter().any(|d| top_dirs.contains(*d)) && ["server", "backend", "api"].iter().any(|d| top_dirs.contains(*d));
-    let models = crate::orm::models(&files);
+    let orm = crate::orm::index(&files);
     for f in files.iter_mut() {
         f.layer = classify(f, fullstack);
-        graph::def_io(f, &[], &models);
+        graph::def_io(f, &[], &orm);
     }
     let known: HashSet<String> = paths.iter().cloned().collect();
     let scip_index = match scip {
@@ -141,7 +142,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     }).collect();
     for (f, c) in files.iter_mut().zip(carried) {
         if !c.is_empty() {
-            graph::def_io(f, &c, &models);
+            graph::def_io(f, &c, &orm);
         }
         if f.layer == Some("tests") {
             f.io.clear();
@@ -149,7 +150,13 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     }
 
     // ---- files the framework loads by convention, and the commands that start the program
-    let (conv_found, conv_loose) = conventions(&files);
+    let (conv_found, mut conv_loose) = conventions(&files);
+    // a routes file no program reaches is read by the framework when the program starts
+    let unreached: Vec<String> = files.iter()
+        .filter(|f| crate::rules::routes_file(&f.path).is_some() && f.layer != Some("tests"))
+        .map(|f| f.path.clone())
+        .collect();
+    conv_loose.extend(unreached);
     let mut conv: BTreeSet<(String, String)> = BTreeSet::new();
     for (a, ms) in &conv_found {
         for m in ms {
@@ -335,7 +342,9 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     for m in conv_loose.iter().filter(|m| !on_way.contains(*m)) {
         // loaded by the framework of the project it sits in, for each of its programs
         for P in &procs {
-            if home(&P.starts[0]) == home(m) {
+            // a routes file is read by a program written in its own language, not by any program next to it
+            let same_language = crate::rules::routes_file(m).is_none() || graph::family(files[ix[&P.starts[0]]].lang) == graph::family(files[ix[m]].lang);
+            if same_language && home(&P.starts[0]) == home(m) {
                 files[ix[&P.starts[0]]].uses.push(m.clone());
                 conv.insert((P.starts[0].clone(), m.clone()));
             }
@@ -760,17 +769,22 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                         },
                     };
                     if hs.is_empty() {
-                        // `[UserController::class, 'index']`: the one method of that class (or module) with that name
+                        // `[UserController::class, 'index']`: the one method of that class (or module) with that name;
+                        // `View.as_view()`: every verb method the class defines
                         if let Some((class, func)) = crate::parse::handler_of(&r.handler).filter(|(c, _)| !c.is_empty()) {
-                            let mut named = files.iter().enumerate().flat_map(|(i, g)| {
+                            let named: Vec<Gid> = files.iter().enumerate().flat_map(|(i, g)| {
                                 let module = crate::resolve::basename(&g.path).split('.').next().unwrap_or("").to_string();
                                 let (class, func) = (class.clone(), func.clone());
                                 g.defs.iter().enumerate()
-                                    .filter(move |(_, d)| d.kind == Kind::Func && d.name == func && (d.owner.as_deref() == Some(class.as_str()) || module == class))
+                                    .filter(move |(_, d)| {
+                                        d.kind == Kind::Func
+                                            && if func.is_empty() { VERB_METHODS.contains(&d.name.as_str()) } else { d.name == func }
+                                            && (d.owner.as_deref() == Some(class.as_str()) || module == class)
+                                    })
                                     .map(move |(j, _)| (i, j))
-                            });
-                            if let (Some(g), None) = (named.next(), named.next()) {
-                                hs.push(g);
+                            }).collect();
+                            if func.is_empty() && named.iter().all(|g| g.0 == named[0].0) || named.len() == 1 {
+                                hs.extend(named);
                             }
                         }
                     }

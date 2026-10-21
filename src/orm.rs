@@ -62,8 +62,61 @@ pub fn models(files: &[File]) -> HashMap<String, usize> {
     out
 }
 
+/// what the repo's ORM-related names are: model classes, and functions that hand out a database session
+pub struct Index {
+    pub models: HashMap<String, usize>,
+    /// `func GetDB() *gorm.DB`, `def get_db() -> Session`: name -> ORM
+    pub getters: HashMap<String, usize>,
+    /// names declared as a session anywhere (a struct field `db: PgPool`): they hold one in the other files too
+    pub names: Vec<(String, usize)>,
+}
+
+pub fn index(files: &[File]) -> Index {
+    let mut getters = HashMap::new();
+    for f in files {
+        for (oi, o) in mine(f) {
+            for d in f.defs.iter().filter(|d| d.kind == Kind::Func) {
+                let line = f.bare[d.start.min(f.bare.len())..].lines().next().unwrap_or("");
+                // the type after the parameter list is the one handed back
+                let Some(open) = line.find('(') else { continue };
+                let (mut depth, mut close) = (0, None);
+                for (i, c) in line[open..].char_indices() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = Some(open + i);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if close.is_some_and(|c| o.handles.iter().any(|h| line[c..].contains(h))) {
+                    getters.insert(d.name.clone(), oi);
+                }
+            }
+        }
+    }
+    let mut names: Vec<(String, usize)> = files.iter().flat_map(|f| handles(f, &getters)).collect();
+    names.sort();
+    names.dedup();
+    Index { models: models(files), getters, names }
+}
+
+/// the names that hold a session in this file: its own, and those declared elsewhere for an ORM it is written for
+pub fn sessions(f: &File, ix: &Index) -> Vec<(String, usize)> {
+    let mut out = handles(f, &ix.getters);
+    let mine: Vec<usize> = mine(f).into_iter().map(|(oi, _)| oi).collect();
+    out.extend(ix.names.iter().filter(|(_, oi)| mine.contains(oi)).cloned());
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// names a file holds a database session in: `db: Session`, `pool: &PgPool`, `db *gorm.DB`, `Connection $pdo`, `s = Session(..)`
-pub fn handles(f: &File) -> Vec<(String, usize)> {
+pub fn handles(f: &File, getters: &HashMap<String, usize>) -> Vec<(String, usize)> {
     const NOT_NAMES: &[&str] = &["return", "var", "func", "type", "struct", "chan", "go", "case", "range", "new", "mut", "let", "const", "use"];
     let mut out = vec![];
     for (oi, o) in mine(f) {
@@ -82,6 +135,14 @@ pub fn handles(f: &File) -> Vec<(String, usize)> {
                     }
                 }
             }
+        }
+    }
+    // `db := common.GetDB()`: the function says what it hands back
+    if !getters.is_empty() {
+        let names = getters.keys().map(|n| regex::escape(n)).collect::<Vec<_>>().join("|");
+        let re = Regex::new(&format!(r"(\$?\w+)\s*(?:,\s*\w+\s*)?:?=\s*(?:\w+(?:\.|::|->))*({names})\s*\(")).unwrap();
+        for c in re.captures_iter(&f.code) {
+            out.push((c[1].trim_start_matches('$').to_string(), getters[&c[2]]));
         }
     }
     out.sort();

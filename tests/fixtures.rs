@@ -1313,3 +1313,65 @@ fn php_orms() {
     let got = steps(&[("public/index.php", "<?php\nfunction q(PDO $pdo) { return $pdo->query('SELECT 1'); }\nq(null);\n")]);
     assert_eq!(got, ["reads database"]);
 }
+
+// ---------------------------------------------------------------- found by running real repositories
+
+#[test]
+fn chained_routes_each_get_their_own_handler() {
+    let d = analyze(&[("src/main.rs", "use axum::{routing::get, Router};\n\nfn main() {\n    let app = Router::new()\n        .route(\"/a\", get(first))\n        .route(\"/b\", get(second));\n}\n\nfn first() {}\n\nfn second() {}\n")]);
+    assert_eq!(route_first(&d, "/a").as_deref(), Some("first()"));
+    assert_eq!(route_first(&d, "/b").as_deref(), Some("second()"));
+}
+
+#[test]
+fn django_regex_patterns_and_class_views() {
+    let d = analyze(&[
+        ("main.py", "import urls\nimport views\n\nif __name__ == \"__main__\":\n    urls.urlpatterns\n"),
+        ("urls.py", "from django.conf.urls import url\nfrom views import FavoriteView\n\nurlpatterns = [url(r'^articles/(?P<slug>[-\\w]+)/favorite/?$', FavoriteView.as_view())]\n"),
+        ("views.py", "class FavoriteView:\n    def post(self, request):\n        return 1\n\n    def delete(self, request):\n        return 2\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["ANY /articles/{slug}/favorite"]);
+    let names: Vec<String> = procs(&d)[0]["routes"][0]["steps"].as_array().unwrap().iter().map(|s| s["n"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["FavoriteView.post()", "FavoriteView.delete()"]); // every verb method the class defines
+}
+
+#[test]
+fn a_session_returned_by_a_function_is_a_session() {
+    let d = analyze(&[
+        ("common/db.go", "package common\n\nimport \"github.com/jinzhu/gorm\"\n\nfunc GetDB() *gorm.DB { return nil }\n"),
+        ("main.go", "package main\n\nimport \"app/common\"\n\nfunc main() { run() }\n\nfunc run() {\n\tdb := common.GetDB()\n\tdb.Where(\"id = ?\", 1).First(&x)\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["reads database"]);
+}
+
+#[test]
+fn a_routes_file_nothing_requires_is_loaded_by_the_framework() {
+    let d = analyze(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../vendor/autoload.php';\n$app = require_once __DIR__ . '/../bootstrap/app.php';\n"),
+        ("routes/web.php", "<?php\nRoute::get('/home', 'HomeController@index');\n"),
+        ("app/Http/Controllers/HomeController.php", "<?php\nclass HomeController {\n    public function index() {}\n}\n"),
+    ]);
+    let all: Vec<String> = procs(&d).iter().flat_map(route_paths).collect();
+    assert_eq!(all, ["GET /home"]);
+    assert_eq!(route_first(&d, "/home").as_deref(), Some("HomeController.index()"));
+}
+
+#[test]
+fn a_session_held_in_a_field_declared_elsewhere() {
+    let d = analyze(&[
+        ("src/state.rs", "use sqlx::PgPool;\n\npub struct Ctx {\n    pub db: PgPool,\n}\n"),
+        ("src/main.rs", "use sqlx::Row;\n\nfn main() { read(todo!()); }\n\nasync fn read(ctx: Ctx) {\n    sqlx::query(\"SELECT 1\").fetch_one(&ctx.db).await;\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["reads database"]);
+}
+
+#[test]
+fn a_controller_named_in_a_string() {
+    let (d, r) = one_route_set(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../routes/api.php';\n"),
+        ("routes/api.php", "<?php\nRoute::resource('articles', 'ArticleController', ['except' => ['create']]);\n"),
+        ("app/Http/Controllers/ArticleController.php", "<?php\nclass ArticleController {\n    public function index() {}\n}\n"),
+    ]);
+    assert!(r.contains(&"GET /articles".to_string()), "{r:?}");
+    assert_eq!(route_first(&d, "/articles").as_deref(), Some("ArticleController.index()"));
+}

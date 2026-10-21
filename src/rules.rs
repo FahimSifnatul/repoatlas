@@ -61,11 +61,19 @@ pub const RESOURCES: &[(&str, &[(&str, &str, &str)])] = &[
 /// `[UserController::class, 'index']`, `'UserController@index'`, `ctrl.profile`, `list_items`
 pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
+        // a class-based view: every verb method of the class runs
+        rx(r"^(?:[\w.]+\.)?(?P<class>\w+)\.as_view\(.*\)$"),
         rx(r#"^\[\s*(?:[\w\\]+\\)?(?P<class>\w+)(?:::class|\.class)?\s*,\s*['"](?P<func>\w+)['"]\s*\]$"#),
         rx(r#"^['"](?:[\w\\]+\\)?(?P<class>\w+)@(?P<func>\w+)['"]$"#),
         rx(r"^(?:[\w$]+(?:\.|::))*(?P<class>[\w$]+)(?:\.|::)(?P<func>[\w$]+)$"),
         rx(r"^(?P<func>[\w$]+)$"),
     ]
+});
+/// the methods of a class-based view or viewset that answer requests
+pub const VERB_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "list", "create", "retrieve", "update", "partial_update", "destroy"];
+/// a path written as a regular expression, turned into the path people see: `^articles/(?P<slug>[-\w]+)/?$` -> articles/{slug}
+pub static PATTERN_PARTS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    vec![(rx(r"\(\?P<(\w+)>[^)]*\)"), "{$1}"), (rx(r"/\?\$$"), ""), (rx(r"\$$"), ""), (rx(r"^\^"), "")]
 });
 /// a handler wrapped in a call that names the verb: `get(list_items)`
 pub static HANDLER_WRAP: LazyLock<Regex> = LazyLock::new(|| rx(r"^(?P<wrap>\w+)\(\s*(?P<inner>[^()]+?)\s*\)$"));
@@ -139,7 +147,7 @@ pub static ORMS: &[Orm] = &[
           writes: &["create", "save", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"] },
     Orm { name: "Pony ORM", lang: "Python", libs: &["pony"], model_bases: &["Entity"], model_attrs: &[], handles: &[],
           reads: &["select", "get", "exists", "count"], writes: &["delete"] },
-    Orm { name: "GORM", lang: "Go", libs: &["gorm.io"], model_bases: &[], model_attrs: &["gorm.Model"], handles: &["gorm.DB"],
+    Orm { name: "GORM", lang: "Go", libs: &["gorm.io", "jinzhu/gorm"], model_bases: &[], model_attrs: &["gorm.Model"], handles: &["gorm.DB"],
           reads: &["Find", "First", "Take", "Last", "Where", "Scan", "Pluck", "Count", "Preload", "Joins", "Rows", "Row"],
           writes: &["Create", "Save", "Update", "Updates", "UpdateColumn", "Delete", "Exec", "FirstOrCreate", "CreateInBatches"] },
     Orm { name: "sqlx", lang: "Go", libs: &["jmoiron/sqlx"], model_bases: &[], model_attrs: &[], handles: &["sqlx.DB", "sqlx.Tx", "sqlx.Conn"],

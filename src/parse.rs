@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{routes_file, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -91,7 +91,7 @@ pub fn handler_of(expr: &str) -> Option<(String, String)> {
     }
     HANDLER_FORMS.iter().find_map(|re| {
         let c = re.captures(expr)?;
-        Some((c.name("class").map_or("", |m| m.as_str()).to_string(), c["func"].to_string()))
+        Some((c.name("class").map_or("", |m| m.as_str()).to_string(), c.name("func").map_or("", |m| m.as_str()).to_string()))
     })
 }
 
@@ -556,7 +556,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
         let in_routes_file = routes_file(&f.path);
         // a whole controller at once: `Route::apiResource('photos', PhotoController::class)`, `router.register(r"users", UserViewSet)`
         if let Some((_, actions)) = RESOURCES.iter().find(|(call, _)| *call == name) {
-            static CLASS: LazyLock<Regex> = LazyLock::new(|| rx(r"(\w+)(?:::class)?\s*$"));
+            static CLASS: LazyLock<Regex> = LazyLock::new(|| rx(r#"(\w+)(?:::class|['"])?\s*$"#));
             let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
             let named = args.first().filter(|a| a.trim_start_matches(|c: char| "rRbBuUfF".contains(c)).starts_with(['"', '\'']));
             if let (Some(path), Some(class)) = (named, args.get(1).and_then(|a| CLASS.captures(a))) {
@@ -582,7 +582,13 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     None if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&upper.as_str()) => upper,
                     None => "ANY".to_string(),
                 };
-                let path = if c[2].starts_with('/') { c[2].to_string() } else { format!("/{}", &c[2]) };
+                let mut path = c[2].to_string();
+                if in_routes_file.is_some() {
+                    for (re, to) in PATTERN_PARTS.iter() {
+                        path = re.replace_all(&path, *to).into_owned();
+                    }
+                }
+                let path = if path.starts_with('/') { path } else { format!("/{path}") };
                 let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
                 // the last argument that is not a keyword other than the one that names the handler
                 let handler = args.iter().skip(1).rev().find_map(|a| match crate::mounts::kwarg(a) {
@@ -601,7 +607,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 if INCLUDE.is_match(&handler) {
                     // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
                 } else {
-                    f.routes.push(Route { verb, path, line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
+                    f.routes.push(Route { verb, path, line, at: callee.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
                 }
             }
         }
