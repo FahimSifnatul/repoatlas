@@ -196,6 +196,9 @@ pub const IO: &[Io] = &[
         r"\bsubprocess\.|\bos\.system\(|\bexec\.Command\(|\bchild_process\b|\bexecSync\(|\bspawn\(|ProcessBuilder|Runtime\.getRuntime\(\)\.exec|std::process::Command|\bCommand::new\(|Process\.Start\(|(?:^|[^\w.>:])system\(|^\s*system\s|\bos\.exec\w*\(|\bsyscall\.Exec\(|^\s*exec\s|\bwebbrowser\.") },
     Io { key: "db", label: "Database", way: "both", pattern: Some(
         r#"\b(?:SELECT\s+[\w*,. ]+\s+FROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|CREATE\s+TABLE)\b|\bsql\.Open\(|\.connect\(\s*['"](?:postgres|mysql|mongodb|redis|sqlite)"#) },
+    // what an ORM call does to the database (orm.rs); a step can also carry "reads User" / "writes database"
+    Io { key: "db_read", label: "Database (read)", way: "in", pattern: None },
+    Io { key: "db_write", label: "Database (write)", way: "out", pattern: None },
     Io { key: "queue", label: "Message queues", way: "both", pattern: None },   // known only from the libraries a file imports
 ];
 pub static IO_RES: LazyLock<Vec<(&'static str, Regex)>> =

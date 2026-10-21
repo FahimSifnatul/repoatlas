@@ -1099,3 +1099,60 @@ fn php_use_follows_psr4() {
     // two classes are called User: the `use` line says which one
     assert_eq!(uses(&d, "app/Http/Controllers/UserController.php"), ["app/Models/User.php"]);
 }
+
+// ---------------------------------------------------------------- orm calls
+
+/// the "db" labels of every step of the journey of the route `path` (or of the program when `path` is empty), flattened
+fn db_steps(d: &Value, path: &str) -> Vec<String> {
+    let p = &procs(d)[0];
+    let steps: Vec<Value> = if path.is_empty() {
+        p["steps"].as_array().cloned().unwrap_or_default()
+    } else {
+        p["routes"].as_array().unwrap().iter().filter(|r| r["path"] == path).flat_map(|r| r["steps"].as_array().cloned().unwrap_or_default()).collect()
+    };
+    steps.iter().flat_map(|s| strs(&s["db"])).collect()
+}
+
+#[test]
+fn django_orm() {
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"),
+        ("shop/models.py", "from django.db import models\n\nclass User(models.Model):\n    name = models.CharField()\n"),
+        ("main.py", "from fastapi import FastAPI\nfrom shop.models import User\n\napp = FastAPI()\n\n@app.get(\"/profile\")\ndef profile():\n    return User.objects.filter(id=1).first()\n\n@app.post(\"/rename\")\ndef rename():\n    user = User.objects.get(id=1)\n    user.name = \"x\"\n    user.save()\n"),
+    ]);
+    assert_eq!(db_steps(&d, "/profile"), ["reads User"]);
+    assert_eq!(db_steps(&d, "/rename"), ["reads User", "writes User"]);
+}
+
+#[test]
+fn plain_collections_are_not_the_database() {
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"),
+        ("main.py", "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/x\")\ndef x(d, items, s, q):\n    a = d.get(\"a\")\n    b = items.filter(lambda i: i)\n    s.add(1)\n    q.put(2)\n    return a\n"),
+    ]);
+    assert_eq!(db_steps(&d, "/x"), Vec::<String>::new());
+    assert!(!d["flow"]["processes"][0]["routes"][0]["io"].as_array().unwrap().iter().any(|k| k.as_str().unwrap().starts_with("db")));
+}
+
+#[test]
+fn an_imported_model_that_is_not_used_adds_no_step() {
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"),
+        ("shop/models.py", "from django.db import models\n\nclass User(models.Model):\n    name = models.CharField()\n"),
+        ("main.py", "from fastapi import FastAPI\nfrom shop.models import User\n\napp = FastAPI()\n\n@app.get(\"/ping\")\ndef ping():\n    return 1\n"),
+    ]);
+    assert_eq!(db_steps(&d, "/ping"), Vec::<String>::new());
+}
+
+#[test]
+fn sqlalchemy_session() {
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"),
+        ("models.py", "from sqlalchemy.orm import DeclarativeBase\n\nclass Base(DeclarativeBase):\n    pass\n\nclass User(Base):\n    pass\n"),
+        ("main.py", "from fastapi import FastAPI\nfrom sqlalchemy import select\nfrom sqlalchemy.orm import Session\nfrom models import User\n\napp = FastAPI()\n\n@app.get(\"/users\")\ndef list_users(db: Session):\n    return db.execute(select(User).where(User.id > 1)).scalars().all()\n\n@app.post(\"/users\")\ndef add_user(db: Session, u):\n    db.add(u)\n    db.commit()\n"),
+    ]);
+    let r = |verb: &str| procs(&d)[0]["routes"].as_array().unwrap().iter().find(|r| r["verb"] == verb).unwrap().clone();
+    let labels = |r: Value| r["steps"].as_array().unwrap().iter().flat_map(|s| strs(&s["db"])).collect::<Vec<_>>();
+    assert_eq!(labels(r("GET")), ["reads User"]);
+    assert_eq!(labels(r("POST")), ["writes database"]); // the model is not named in the call
+}

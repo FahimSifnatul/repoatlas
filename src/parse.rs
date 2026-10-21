@@ -46,6 +46,8 @@ pub struct Def {
     pub prefix: String,
     /// what this definition's own body takes in and gives out (filled by analyze)
     pub io: Vec<&'static str>,
+    /// the database calls its own body makes through an ORM: "reads User", "writes database" (filled by analyze)
+    pub db: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -371,7 +373,7 @@ pub fn parse(f: &mut File) {
     let base = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     f.defs.push(Def {
         name: base, kind: Kind::Module, start: 0, end: f.text.len(), line: 1, parent: None, owner: None, bases: vec![],
-        sig: String::new(), doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![],
+        sig: String::new(), doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![], db: vec![],
     });
     match key.and_then(|k| lang::GRAMMARS.get(k)) {
         Some(g) => parse_tree(f, &src, g),
@@ -450,6 +452,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     route_on: if kind == Kind::Func { decorator_recv(&src[head..name.start_byte()]) } else { String::new() },
                     prefix: if kind == Kind::Class { class_prefix(&src[head..name.start_byte()]) } else { String::new() },
                     io: vec![],
+                    db: vec![],
                 });
                 // a decorated / annotated definition is described from its first decorator line
                 if head < node.start_byte() {
@@ -469,7 +472,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     defs.push(Def {
                         name: first, kind: Kind::Main, start: node.start_byte(), end: node.end_byte(),
                         line: node.start_position().row + 1, parent: None, owner: None, bases: vec![], sig: String::new(),
-                        doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![],
+                        doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![], db: vec![],
                     });
                 }
             }

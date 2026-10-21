@@ -506,6 +506,9 @@ function nodeView(n) {
 /* ---------- how it runs ---------- */
 const WAY = {in:'#1fa971', out:'#f08a24', both:'#17a2b8'};
 const SAYS = {in:'Takes this in', out:'Gives this out', both:'Takes in and gives out'};
+function dbPills(labels) {
+  return (labels || []).map(t => { const w = t.startsWith('reads') ? 'in' : 'out'; return el('span', {class:'iop', style:`--k:${WAY[w]}`, title:SAYS[w]}, t); });
+}
 function ioPills(keys) {
   return (keys || []).filter(k => IO[k]).map(k => el('span', {class:'iop', style:`--k:${WAY[IO[k][1]]}`, title:SAYS[IO[k][1]]}, IO[k][0]));
 }
@@ -539,7 +542,7 @@ function outline(steps, open, prefix) {
          tag ? el('span', {class:'tag'}, tag) : null,
          s.when ? el('span', {class:'tag'}, {if:'only in some cases', loop:'repeated in a loop', error:'when something fails'}[s.when]) : null,
          s.seen != null ? el('button', {class:'again', onclick:() => jump(s.seen)}, (s.k === 'recursion' ? '↻ calls back into step ' : '↻ same as step ') + (s.seen + 1)) : null,
-         ioPills(s.io)];
+         ioPills(s.io), dbPills(s.db)];
     r.append(el('span', {class:'no'}, i + 1), el('div', {class:'bd'}, el('div', {class:'sl'}, line),
       s.doc ? el('p', {class:'sdoc2'}, s.doc) : null,
       s.more && s.k !== 'more' ? el('p', {class:'sm'}, `${pl(s.more, 'deeper call')} not shown`) : null));

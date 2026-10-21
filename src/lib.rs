@@ -10,6 +10,7 @@ pub mod lang;
 pub mod launch;
 pub mod layers;
 pub mod mounts;
+pub mod orm;
 pub mod parse;
 pub mod resolve;
 pub mod rules;

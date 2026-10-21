@@ -83,3 +83,36 @@ pub const SCOPE_CALLS: &[&str] = &["Route", "group"];
 pub static SCOPE_FIRST_ARG: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\(\s*['"`]([^'"`]*)['"`]"#));
 pub static SCOPE_CHAIN: LazyLock<Regex> = LazyLock::new(|| rx(r#"\bprefix\s*\(\s*['"]([^'"]*)['"]\s*\)"#));
 pub static SCOPE_ARRAY: LazyLock<Regex> = LazyLock::new(|| rx(r#"['"]prefix['"]\s*=>\s*['"]([^'"]*)['"]"#));
+
+/// What an ORM looks like in code.
+pub struct Orm {
+    pub name: &'static str,
+    /// the language it is written in (lang::Lang.name)
+    pub lang: &'static str,
+    /// a file that mentions one of these is written for this ORM
+    pub libs: &'static [&'static str],
+    /// a class that extends one of these is a model
+    pub model_bases: &'static [&'static str],
+    /// text above or at the start of a class that makes it a model: `#[derive(DeriveEntityModel)]`, `gorm.Model`
+    pub model_attrs: &'static [&'static str],
+    /// types a database session or connection is declared as
+    pub handles: &'static [&'static str],
+    /// names called on a model or session that read
+    pub reads: &'static [&'static str],
+    /// names called on a model, a session or an instance that write
+    pub writes: &'static [&'static str],
+}
+
+pub static ORMS: &[Orm] = &[
+    Orm { name: "Django ORM", lang: "Python", libs: &["django.db"], model_bases: &["Model"], model_attrs: &[], handles: &[],
+          reads: &["filter", "get", "all", "first", "last", "exclude", "count", "exists", "values", "values_list", "aggregate", "annotate",
+                   "select_related", "prefetch_related", "in_bulk", "latest", "earliest"],
+          writes: &["save", "create", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"] },
+    Orm { name: "SQLAlchemy", lang: "Python", libs: &["sqlalchemy"], model_bases: &["Base", "DeclarativeBase"], model_attrs: &[],
+          handles: &["Session", "AsyncSession", "scoped_session"],
+          reads: &["query", "get", "scalars", "scalar", "scalar_one", "execute", "all", "first", "one", "one_or_none", "filter", "filter_by", "count"],
+          writes: &["add", "add_all", "delete", "merge", "commit", "flush", "bulk_save_objects", "bulk_insert_mappings"] },
+    Orm { name: "SQLModel", lang: "Python", libs: &["sqlmodel"], model_bases: &["SQLModel"], model_attrs: &[], handles: &["Session"],
+          reads: &["exec", "get", "scalars", "all", "first", "one", "one_or_none"],
+          writes: &["add", "add_all", "delete", "merge", "commit", "flush"] },
+];

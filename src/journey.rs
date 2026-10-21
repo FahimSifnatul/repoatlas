@@ -222,6 +222,11 @@ pub fn steps_json(ctx: &Ctx, steps: &[Step]) -> Vec<Value> {
             if !io.is_empty() {
                 m.insert("io".into(), json!(io));
             }
+            if let (Some(d), None) = (d, s.seen) {
+                if !d.db.is_empty() {
+                    m.insert("db".into(), json!(d.db));
+                }
+            }
             if let Some(i) = s.seen {
                 m.insert("seen".into(), json!(i));
             }

@@ -111,9 +111,10 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     // layers first: repo code never calls into a test file's helpers
     let top_dirs: HashSet<String> = files.iter().filter(|f| f.path.contains('/')).map(|f| f.path.split('/').next().unwrap().to_lowercase()).collect();
     let fullstack = ["client", "frontend", "web"].iter().any(|d| top_dirs.contains(*d)) && ["server", "backend", "api"].iter().any(|d| top_dirs.contains(*d));
+    let models = crate::orm::models(&files);
     for f in files.iter_mut() {
         f.layer = classify(f, fullstack);
-        graph::def_io(f, &[]);
+        graph::def_io(f, &[], &models);
     }
     let known: HashSet<String> = paths.iter().cloned().collect();
     let scip_index = match scip {
@@ -140,7 +141,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     }).collect();
     for (f, c) in files.iter_mut().zip(carried) {
         if !c.is_empty() {
-            graph::def_io(f, &c);
+            graph::def_io(f, &c, &models);
         }
         if f.layer == Some("tests") {
             f.io.clear();

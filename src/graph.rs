@@ -863,7 +863,7 @@ pub fn resolve_calls(files: &mut [File], libs: &HashMap<String, String>, scip: O
 
 /// What each definition's own body takes in and gives out (nested definitions count for themselves).
 /// carried: names bound to a module of the repo that opens a database / HTTP / queue client, with what it opens.
-pub fn def_io(f: &mut File, carried: &[(String, &'static str)]) {
+pub fn def_io(f: &mut File, carried: &[(String, &'static str)], models: &HashMap<String, usize>) {
     static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z_]\w*").unwrap());
     let n = f.defs.len();
     let mut kids: Vec<Vec<usize>> = vec![vec![]; n];
@@ -894,6 +894,8 @@ pub fn def_io(f: &mut File, carried: &[(String, &'static str)]) {
     libs.extend(carried.iter().cloned());
     let mut lib_found: HashSet<&'static str> = HashSet::new();
     let mut ios = vec![vec![]; n];
+    let mut dbs: Vec<Vec<String>> = vec![vec![]; n];
+    let sessions = crate::orm::handles(f);
     for i in 0..n {
         let d = &f.defs[i];
         if matches!(d.kind, Kind::Class | Kind::Type | Kind::Impl) && i != 0 {
@@ -919,6 +921,18 @@ pub fn def_io(f: &mut File, carried: &[(String, &'static str)]) {
         if d.route.is_some() || f.routes.iter().any(|r| r.def == i) {
             found.push("http_in");
         }
+        // an ORM call says more than the library it comes from: "reads User" instead of just "database"
+        let labels = crate::orm::accesses(&code, &sessions, models);
+        if !labels.is_empty() {
+            found.retain(|k| *k != "db");
+            if labels.iter().any(|l| l.starts_with("reads")) {
+                found.push("db_read");
+            }
+            if labels.iter().any(|l| l.starts_with("writes")) {
+                found.push("db_write");
+            }
+        }
+        dbs[i] = labels;
         ios[i] = found;
     }
     for (_, io) in &libs {
@@ -936,6 +950,7 @@ pub fn def_io(f: &mut File, carried: &[(String, &'static str)]) {
         io.dedup();
         all.extend(io.iter().copied());
         f.defs[i].io = io;
+        f.defs[i].db = std::mem::take(&mut dbs[i]);
     }
     if has_routes {
         all.insert("http_in");
