@@ -999,3 +999,46 @@ fn unknown_handler_is_harmless() {
     assert_eq!(route_paths(&procs(&d)[0]), ["GET /x"]);
     assert_eq!(route_first(&d, "/x"), None);
 }
+
+// ---------------------------------------------------------------- attribute routes and routes files
+
+#[test]
+fn rust_attribute_routes() {
+    let d = analyze(&[(
+        "src/main.rs",
+        "use actix_web::{get, route, App, HttpServer};\n\n#[get(\"/users\")]\nasync fn list() {}\n\n#[route(\"/x\", method = \"GET\")]\nasync fn x() {}\n\nfn main() {\n    HttpServer::new(|| App::new().service(list).service(x));\n}\n",
+    )]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /users", "GET /x"]);
+}
+
+#[test]
+fn php_attribute_routes() {
+    let d = analyze(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../src/A.php';\n"),
+        ("src/A.php", "<?php\n#[Route('/api')]\nclass A {\n    #[Route('/users', methods: ['GET'])]\n    public function list() {}\n}\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/users"]);
+}
+
+#[test]
+fn routes_file_without_leading_slash() {
+    let d = analyze(&[
+        ("main.py", "from app import urls, util\n\nif __name__ == '__main__':\n    util.run()\n"),
+        ("app/__init__.py", ""),
+        ("app/urls.py", "from django.urls import path\nfrom app import views\n\nurlpatterns = [path(\"users/\", views.users)]\n"),
+        ("app/views.py", "def users():\n    return 1\n"),
+        ("app/util.py", "def run():\n    return path(\"users/\", 1)\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["ANY /users/"]); // util.py is not a routes file: path() there is just a call
+}
+
+#[test]
+fn a_call_named_like_a_route_outside_a_routes_file_is_not_one() {
+    let d = analyze(&[
+        ("routes/web.php", "<?php\nRoute::get('users', 'U@index');\n"),
+        ("server.js", "const express = require('express')\nconst app = express()\nconst name = cache.get('name')\napp.listen(3000)\n"),
+        ("util.py", "def f(logger):\n    return logger.get(\"name\")\n"),
+    ]);
+    let all: Vec<String> = d["nodes"].as_object().unwrap().values().flat_map(|n| n["symbols"].as_array().cloned().unwrap_or_default()).filter(|s| s["k"] == "route").map(|s| s["n"].as_str().unwrap().to_string()).collect();
+    assert_eq!(all, ["users"]);
+}

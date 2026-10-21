@@ -26,10 +26,13 @@ pub static ROUTE_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         rx(r#"HandleFunc\(\s*"([^"]+)""#),
     ]
 });
-/// a route written above a function: @app.get("/x"), @router.post(...), @GetMapping("/x"), [HttpGet("x")]
+/// what opens an attribute: `@` (decorators, annotations) or `#[` with an optional path (`#[actix_web::get(..)]`, `#[Route(..)]`)
+const ATTR: &str = r"(?:@|#\[\s*(?:[\w:\\]*(?:::|\\))?)";
+
+/// a route written above a function: @app.get("/x"), @router.post(...), @GetMapping("/x"), [HttpGet("x")], #[get("/x")]
 pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        rx(r#"@(?:[\w.]+\.)?(?i:(get|post|put|delete|patch|route|head|options|websocket))\(\s*[rbuf]*['"]([^'"]+)['"]"#),
+        rx(&format!(r#"{ATTR}(?:[\w.]+\.)?(?i:(get|post|put|delete|patch|route|head|options|websocket))\(\s*[rbuf]*['"]([^'"]+)['"]"#)),
         rx(r#"@(Get|Post|Put|Delete|Patch|Request)Mapping\(\s*(?:value\s*=\s*|path\s*=\s*)?"([^"]*)""#),
         rx(r#"\[Http(Get|Post|Put|Delete|Patch)\(\s*"([^"]*)""#),
     ]
@@ -50,3 +53,23 @@ pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 /// a handler wrapped in a call that names the verb: `get(list_items)`
 pub static HANDLER_WRAP: LazyLock<Regex> = LazyLock::new(|| rx(r"^(?P<wrap>\w+)\(\s*(?P<inner>[^()]+?)\s*\)$"));
+
+/// a class-wide route prefix: `@RequestMapping("/api")`, `@Controller('users')`, `#[Route('/api')]`
+pub static CLASS_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    rx(&format!(r#"{ATTR}(?:RequestMapping|Controller|RoutePrefix|RestController|Route)\(\s*(?:value\s*=\s*|path\s*=\s*)?['"]([^'"]*)['"]"#))
+});
+
+/// files that hold nothing but route registrations: (folder, file name ending, the calls that register; none = the usual ones).
+/// Their paths need no leading slash: `path("users/", view)`, `Route::get('users', ..)`
+pub const ROUTE_FILES: &[(&str, &str, &[&str])] = &[
+    ("", "urls.py", &["path", "re_path", "url"]),
+    ("routes/", ".php", &[]),
+];
+
+/// the calls that register a route in this file, if it is a routes file
+pub fn routes_file(path: &str) -> Option<&'static [&'static str]> {
+    ROUTE_FILES
+        .iter()
+        .find(|(dir, ending, _)| path.ends_with(ending) && (dir.is_empty() || path.starts_with(dir) || path.contains(&format!("/{dir}"))))
+        .map(|(_, _, calls)| *calls)
+}

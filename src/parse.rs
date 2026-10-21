@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_WRAP, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_WRAP, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -329,7 +329,7 @@ fn head_of(node: Node) -> usize {
 }
 
 fn decorator_route(head: &str) -> Option<(String, String)> {
-    static METHODS: LazyLock<Regex> = LazyLock::new(|| rx(r"methods\s*=\s*[\[(]([^\])]*)"));
+    static METHODS: LazyLock<Regex> = LazyLock::new(|| rx(r"methods?\s*[=:]\s*[\[(]?([^\])\n]*)"));
     for re in DECORATOR_ROUTES.iter() {
         if let Some(c) = re.captures(head) {
             let mut verb = c[1].to_uppercase();
@@ -356,10 +356,7 @@ fn decorator_recv(head: &str) -> String {
 
 /// A class-wide route prefix: `@RequestMapping("/api")`, `@Controller('users')`, `@RoutePrefix("api")`
 fn class_prefix(head: &str) -> String {
-    static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
-        rx(r#"@(?:RequestMapping|Controller|RoutePrefix|RestController)\(\s*(?:value\s*=\s*|path\s*=\s*)?['"]([^'"]*)['"]"#)
-    });
-    PREFIX.captures(head).map(|c| c[1].to_string()).unwrap_or_default()
+    CLASS_PREFIX.captures(head).map(|c| c[1].to_string()).unwrap_or_default()
 }
 
 /// Strip generics and paths from a captured name: `Foo<T>` -> Foo, `Util::go` -> go
@@ -553,17 +550,19 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
         let at = callee.start_byte();
         let def = innermost(at, &f.defs);
         let line = callee.start_position().row + 1;
-        if ROUTE_CALLS.contains(&name.as_str()) {
+        let in_routes_file = routes_file(&f.path);
+        if ROUTE_CALLS.contains(&name.as_str()) || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str())) {
             static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
-            if let Some(c) = FIRST.captures(&src[callee.end_byte()..node.end_byte()]) {
-                let verb = if let Some(v) = c.get(1) {
-                    v.as_str().to_string() // "GET /users/{id}": the verb is written in the pattern
-                } else if name.len() <= 6 && name != "handle" && name != "route" {
-                    name.to_uppercase()
-                } else {
-                    "ANY".into()
+            static FIRST_ANY: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*r?['"`](?:([A-Z]+)\s+)?([^'"`]*)['"`]"#));
+            let re = if in_routes_file.is_some() { &FIRST_ANY } else { &FIRST };
+            if let Some(c) = re.captures(&src[callee.end_byte()..node.end_byte()]) {
+                let upper = name.to_uppercase();
+                let verb = match c.get(1) {
+                    Some(v) => v.as_str().to_string(), // "GET /users/{id}": the verb is written in the pattern
+                    None if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&upper.as_str()) => upper,
+                    None => "ANY".to_string(),
                 };
-                let verb = if verb == "ALL" { "ANY".into() } else { verb };
+                let path = if c[2].starts_with('/') { c[2].to_string() } else { format!("/{}", &c[2]) };
                 let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
                 let handler = if args.len() >= 2 { args[args.len() - 1].clone() } else { String::new() };
                 // `.route("/x", get(list))`: the verb is the name of the wrapping call
@@ -571,7 +570,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,
                     _ => verb,
                 };
-                f.routes.push(Route { verb, path: c[2].to_string(), line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
+                f.routes.push(Route { verb, path, line, at: node.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
             }
         }
         f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(), line, def, is_ref: false, cond: cond_of(node) });
