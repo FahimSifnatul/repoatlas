@@ -132,30 +132,6 @@ fn frx(p: &str) -> fancy_regex::Regex {
 }
 
 pub static CHDIR: LazyLock<Regex> = LazyLock::new(|| rx(r#"\b(?:chdir|Chdir|cd)\s*\(?\s*["']?(/?[\w./-]+)"#));
-pub static ROUTE_HINT: LazyLock<Regex> = LazyLock::new(|| {
-    rx(r"@(?:\w+\.)?(?:route|get|post|put|delete|patch)\(|\b(?:app|router)\.(?:get|post|put|delete|patch|use)\(|@RestController|@Controller|@(?:Get|Post|Put|Delete|Patch|Request)Mapping|HandleFunc\(|urlpatterns")
-});
-/// app.get("/x"), Route::get("/x"), @GetMapping("/x"), r.GET("/x"), HandleFunc("/x")
-pub static ROUTE_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        rx(r#"\b(?:app|router|routes?|Route)(?:\.|->|::)(get|post|put|delete|patch|all|any)\(\s*['"`]([^'"`]+)['"`]"#),
-        rx(r#"@(Get|Post|Put|Delete|Patch)Mapping\(\s*(?:value\s*=\s*|path\s*=\s*)?"([^"]*)""#),
-        rx(r#"\.(GET|POST|PUT|DELETE|PATCH)\(\s*"([^"]+)""#),
-        rx(r#"HandleFunc\(\s*"([^"]+)""#),
-    ]
-});
-/// a route written above a function: @app.get("/x"), @router.post(...), @GetMapping("/x"), [HttpGet("x")]
-pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        rx(r#"@(?:[\w.]+\.)?(?i:(get|post|put|delete|patch|route|head|options|websocket))\(\s*[rbuf]*['"]([^'"]+)['"]"#),
-        rx(r#"@(Get|Post|Put|Delete|Patch|Request)Mapping\(\s*(?:value\s*=\s*|path\s*=\s*)?"([^"]*)""#),
-        rx(r#"\[Http(Get|Post|Put|Delete|Patch)\(\s*"([^"]*)""#),
-    ]
-});
-/// call names that register a web endpoint: app.get("/x", handler), mux.HandleFunc("/x", h)
-pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
-    "GET", "POST", "PUT", "DELETE", "PATCH"];
-
 /// comments and docstrings mention files and calls the code never makes; long strings hold messages, patterns, SQL
 /// (used only for files without a grammar: pages and style sheets)
 pub static COMMENTS: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {

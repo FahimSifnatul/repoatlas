@@ -11,11 +11,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::parse::File;
-
-/// calls that put one router under another
-const MOUNT_CALLS: &[&str] = &["include_router", "register_blueprint", "use", "mount", "Mount", "add_router"];
-/// calls that make a sub-router with a prefix: `v1 := r.Group("/v1")`
-const GROUP_CALLS: &[&str] = &["Group", "group", "Party"];
+use crate::rules::{GROUP_CALLS, MOUNT_CALLS};
 
 /// (file, name of the router object in it); the name `*` stands for every router a file builds
 type Key = (usize, String);

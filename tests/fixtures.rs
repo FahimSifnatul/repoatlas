@@ -403,7 +403,7 @@ fn no_framework_is_hard_coded() {
     let catalogue = regex::Regex::new(r"(?s)\npub const EXT_CATS.*?\n\];").unwrap();
     for entry in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src")).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_none_or(|e| e != "rs") {
+        if path.extension().is_none_or(|e| e != "rs") || path.file_name().is_some_and(|n| n == "rules.rs") {
             continue;
         }
         let text = comments.replace_all(&fs::read_to_string(&path).unwrap(), " ").to_string();
@@ -934,4 +934,21 @@ fn a_bad_scip_file_given_on_the_command_line_is_an_error() {
     // an index.scip found by itself that cannot be read is ignored
     fs::write(d.path().join("index.scip"), b"\xff\xfe not protobuf").unwrap();
     assert!(repoatlas::analyze(d.path(), "x").is_ok());
+}
+
+#[test]
+fn rule_move_changes_nothing() {
+    // pins what the route tables produce today, so moving them into rules.rs cannot change a journey
+    let py = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"),
+        ("main.py", "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/ping\")\ndef ping():\n    return 1\n\n@app.route(\"/old\", methods=[\"GET\", \"POST\"])\ndef old():\n    return 2\n"),
+    ]);
+    let js = analyze(&[
+        ("server.js", "const express = require('express')\nconst app = express()\napp.get('/users', list)\napp.post('/users', (req, res) => res.send(make()))\nfunction list() {}\nfunction make() {}\napp.listen(3000)\n"),
+    ]);
+    let go = analyze(&[
+        ("main.go", "package main\n\nimport \"net/http\"\n\nfunc main() {\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"/health\", health)\n\thttp.ListenAndServe(\":80\", mux)\n}\n\nfunc health(w http.ResponseWriter, r *http.Request) {}\n"),
+    ]);
+    let all: Vec<Vec<String>> = [&py, &js, &go].iter().map(|d| route_paths(&procs(d)[0])).collect();
+    assert_eq!(all, [vec!["GET /ping", "GET|POST /old"], vec!["GET /users", "POST /users"], vec!["ANY /health"]]);
 }

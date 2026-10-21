@@ -12,6 +12,7 @@ pub mod layers;
 pub mod mounts;
 pub mod parse;
 pub mod resolve;
+pub mod rules;
 pub mod scan;
 pub mod scip;
 pub mod stdlib;

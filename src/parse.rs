@@ -9,7 +9,8 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::tables::{COMMENTS, DECORATOR_ROUTES, ROUTE_CALLS, ROUTE_RES, STRINGS};
+use crate::rules::{DECORATOR_ROUTES, ROUTE_CALLS, ROUTE_RES};
+use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

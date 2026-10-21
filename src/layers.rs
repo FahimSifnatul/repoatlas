@@ -8,7 +8,8 @@ use regex::Regex;
 
 use crate::parse::File;
 use crate::resolve::{basename, dirname};
-use crate::tables::{cat_of, toks, CAT_LAYER, ROUTE_HINT, TOKEN_LAYER, WEAK_TESTS};
+use crate::rules::ROUTE_HINT;
+use crate::tables::{cat_of, toks, CAT_LAYER, TOKEN_LAYER, WEAK_TESTS};
 
 /// A counter that remembers the order keys were first seen, so ties break the same way every run.
 #[derive(Default, Clone)]
