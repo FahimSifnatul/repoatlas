@@ -81,7 +81,7 @@ pub(crate) fn args_of(text: &str) -> Vec<String> {
 }
 
 /// `prefix="/x"` -> ("prefix", "\"/x\"")
-fn kwarg(a: &str) -> Option<(&str, &str)> {
+pub(crate) fn kwarg(a: &str) -> Option<(&str, &str)> {
     static KW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([A-Za-z_]\w*)\s*[=:]\s*(.+)$").unwrap());
     let c = KW.captures(a)?;
     let v = c.get(2)?;

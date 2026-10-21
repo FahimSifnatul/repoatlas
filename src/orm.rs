@@ -78,7 +78,7 @@ pub fn handles(f: &File) -> Vec<(String, usize)> {
             for re in forms {
                 for c in Regex::new(&re).unwrap().captures_iter(&f.code) {
                     if !NOT_NAMES.contains(&&c[1]) {
-                        out.push((c[1].to_string(), oi));
+                        out.push((c[1].trim_start_matches('$').to_string(), oi));
                     }
                 }
             }
@@ -117,6 +117,27 @@ fn chain(code: &str, mut i: usize) -> (Vec<&str>, String) {
             break;
         }
         methods.push(&code[s..j]);
+        if b.get(j) == Some(&b'!') && b.get(j + 1) == Some(&b'(') {
+            j += 1; // a macro: sqlx::query!(..)
+        }
+        if code[j..].starts_with("::<") {
+            // a turbofish: load::<User>(conn)
+            let mut depth = 0;
+            while j < b.len() {
+                match b[j] {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
         if b.get(j) == Some(&b'(') {
             let (mut depth, mut k) = (0i32, j);
             while k < b.len() {
@@ -168,15 +189,23 @@ pub fn accesses(code: &str, handles: &[(String, usize)], models: &HashMap<String
         let label = if let (Some(&oi), false) = (models.get(w), member) {
             let (read, write) = verbs(oi);
             (read || write).then(|| (write, w.to_string()))
-        } else if let Some((_, oi)) = handles.iter().find(|(n, _)| n == w) {
+        } else if let Some((_, oi)) = handles.iter().find(|(n, _)| n == w.trim_start_matches('$')) {
             let (read, write) = verbs(*oi);
             let model = WORD.find_iter(&args).map(|x| x.as_str()).find(|x| models.contains_key(*x)).unwrap_or("database");
             (read || write).then(|| (write, model.to_string()))
         } else if let (Some(model), false) = (instances.get(w), member) {
             let (_, write) = verbs(models[*model]);
             write.then(|| (true, model.to_string()))
-        } else {
+        } else if member {
             None
+        } else {
+            // the session is handed to the call that runs the query: `sqlx::query(..).fetch_all(pool)`, `users.load(conn)`
+            let words: Vec<&str> = WORD.find_iter(&args).map(|x| x.as_str()).collect();
+            handles.iter().find(|(n, _)| words.iter().any(|x| x.trim_start_matches('$') == n)).and_then(|(_, oi)| {
+                let (read, write) = verbs(*oi);
+                let model = words.iter().copied().find(|x| models.contains_key(*x)).unwrap_or("database");
+                (read || write).then(|| (write, model.to_string()))
+            })
         };
         if let Some((write, model)) = label {
             let l = format!("{} {model}", if write { "writes" } else { "reads" });

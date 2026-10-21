@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{routes_file, CLASS_PREFIX, INCLUDE, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_WRAP, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -554,12 +554,29 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
         let def = innermost(at, &f.defs);
         let line = callee.start_position().row + 1;
         let in_routes_file = routes_file(&f.path);
-        if ROUTE_CALLS.contains(&name.as_str()) || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str())) {
+        // a whole controller at once: `Route::apiResource('photos', PhotoController::class)`, `router.register(r"users", UserViewSet)`
+        if let Some((_, actions)) = RESOURCES.iter().find(|(call, _)| *call == name) {
+            static CLASS: LazyLock<Regex> = LazyLock::new(|| rx(r"(\w+)(?:::class)?\s*$"));
+            let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
+            let named = args.first().filter(|a| a.trim_start_matches(|c: char| "rRbBuUfF".contains(c)).starts_with(['"', '\'']));
+            if let (Some(path), Some(class)) = (named, args.get(1).and_then(|a| CLASS.captures(a))) {
+                let path = path.trim_start_matches(|c: char| "rRbBuUfF".contains(c)).trim_matches(['"', '\'']);
+                for (verb, suffix, action) in actions.iter() {
+                    f.routes.push(Route {
+                        verb: verb.to_string(), path: format!("/{}{suffix}", path.trim_matches('/')), line, at: node.start_byte(), end: node.end_byte(), def,
+                        recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler: format!("{}.{action}", &class[1]),
+                    });
+                }
+            }
+        }
+        if ROUTE_CALLS.contains(&name.as_str()) && (recv.is_empty() || !ROUTE_BARE.contains(&name.as_str()))
+            || recv.is_empty() && ROUTE_BARE.contains(&name.as_str())
+            || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str())) {
             static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
             static FIRST_ANY: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*r?['"`](?:([A-Z]+)\s+)?([^'"`]*)['"`]"#));
             let re = if in_routes_file.is_some() { &FIRST_ANY } else { &FIRST };
             if let Some(c) = re.captures(&src[callee.end_byte()..node.end_byte()]) {
-                let upper = name.to_uppercase();
+                let upper = name.trim_start_matches("add_").to_uppercase();
                 let verb = match c.get(1) {
                     Some(v) => v.as_str().to_string(), // "GET /users/{id}": the verb is written in the pattern
                     None if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&upper.as_str()) => upper,
@@ -567,7 +584,15 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 };
                 let path = if c[2].starts_with('/') { c[2].to_string() } else { format!("/{}", &c[2]) };
                 let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
-                let handler = if args.len() >= 2 { args[args.len() - 1].clone() } else { String::new() };
+                // the last argument that is not a keyword other than the one that names the handler
+                let handler = args.iter().skip(1).rev().find_map(|a| match crate::mounts::kwarg(a) {
+                    Some((k, v)) => HANDLER_KWARGS.contains(&k).then(|| v.to_string()),
+                    None => Some(a.clone()),
+                }).unwrap_or_default();
+                let verb = match METHODS_AFTER.captures(&src[node.end_byte()..]) {
+                    Some(m) if verb == "ANY" => m[1].to_uppercase(),
+                    _ => verb,
+                };
                 // `.route("/x", get(list))`: the verb is the name of the wrapping call
                 let verb = match HANDLER_WRAP.captures(&handler).map(|w| w["wrap"].to_uppercase()) {
                     Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,

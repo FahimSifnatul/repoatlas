@@ -39,7 +39,23 @@ pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 /// call names that register a web endpoint: app.get("/x", handler), mux.HandleFunc("/x", h)
 pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
-    "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch"];
+    "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch", "at", "add_route", "add_api_route",
+    "add_url_rule", "add_get", "add_post", "add_put", "add_delete", "add_patch"];
+/// call names that register a route only when called bare: `Route("/x", handler)` (a method called `Route` makes a group instead)
+pub const ROUTE_BARE: &[&str] = &["Route"];
+/// the keyword that carries the handler: `add_url_rule("/x", view_func=users)`
+pub const HANDLER_KWARGS: &[&str] = &["view_func", "endpoint", "handler", "controller", "to", "uses"];
+/// the verb written after the call: `r.HandleFunc("/x", h).Methods("GET")`
+pub static METHODS_AFTER: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\.\s*Methods\(\s*"(\w+)""#));
+
+/// calls that register a whole controller: `Route::apiResource('photos', PhotoController::class)`,
+/// `router.register(r"users", UserViewSet)`. Each action: (verb, what follows the name, method called)
+pub const RESOURCES: &[(&str, &[(&str, &str, &str)])] = &[
+    ("resource", &[("GET", "", "index"), ("GET", "/create", "create"), ("POST", "", "store"), ("GET", "/{id}", "show"),
+                   ("GET", "/{id}/edit", "edit"), ("PUT", "/{id}", "update"), ("DELETE", "/{id}", "destroy")]),
+    ("apiResource", &[("GET", "", "index"), ("POST", "", "store"), ("GET", "/{id}", "show"), ("PUT", "/{id}", "update"), ("DELETE", "/{id}", "destroy")]),
+    ("register", &[("GET", "/", "list"), ("POST", "/", "create"), ("GET", "/{pk}/", "retrieve"), ("PUT", "/{pk}/", "update"), ("DELETE", "/{pk}/", "destroy")]),
+];
 
 /// how a route's handler is written, the last argument of the registering call: the class (if any) and the function.
 /// `[UserController::class, 'index']`, `'UserController@index'`, `ctrl.profile`, `list_items`
@@ -115,4 +131,42 @@ pub static ORMS: &[Orm] = &[
     Orm { name: "SQLModel", lang: "Python", libs: &["sqlmodel"], model_bases: &["SQLModel"], model_attrs: &[], handles: &["Session"],
           reads: &["exec", "get", "scalars", "all", "first", "one", "one_or_none"],
           writes: &["add", "add_all", "delete", "merge", "commit", "flush"] },
+    Orm { name: "Peewee", lang: "Python", libs: &["peewee"], model_bases: &["Model"], model_attrs: &[], handles: &[],
+          reads: &["select", "get", "get_or_none", "get_by_id", "where", "count", "exists", "first"],
+          writes: &["create", "save", "delete_instance", "insert", "insert_many", "update", "delete", "get_or_create", "replace"] },
+    Orm { name: "Tortoise ORM", lang: "Python", libs: &["tortoise"], model_bases: &["Model"], model_attrs: &[], handles: &[],
+          reads: &["filter", "get", "all", "first", "exclude", "get_or_none", "count", "exists", "values", "values_list", "annotate"],
+          writes: &["create", "save", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"] },
+    Orm { name: "Pony ORM", lang: "Python", libs: &["pony"], model_bases: &["Entity"], model_attrs: &[], handles: &[],
+          reads: &["select", "get", "exists", "count"], writes: &["delete"] },
+    Orm { name: "GORM", lang: "Go", libs: &["gorm.io"], model_bases: &[], model_attrs: &["gorm.Model"], handles: &["gorm.DB"],
+          reads: &["Find", "First", "Take", "Last", "Where", "Scan", "Pluck", "Count", "Preload", "Joins", "Rows", "Row"],
+          writes: &["Create", "Save", "Update", "Updates", "UpdateColumn", "Delete", "Exec", "FirstOrCreate", "CreateInBatches"] },
+    Orm { name: "sqlx", lang: "Go", libs: &["jmoiron/sqlx"], model_bases: &[], model_attrs: &[], handles: &["sqlx.DB", "sqlx.Tx", "sqlx.Conn"],
+          reads: &["Get", "Select", "Query", "Queryx", "QueryRow", "QueryRowx", "QueryContext", "QueryRowContext", "GetContext", "SelectContext", "NamedQuery"],
+          writes: &["Exec", "ExecContext", "MustExec", "NamedExec", "NamedExecContext"] },
+    Orm { name: "database/sql", lang: "Go", libs: &["database/sql"], model_bases: &[], model_attrs: &[], handles: &["sql.DB", "sql.Tx", "sql.Conn"],
+          reads: &["Query", "QueryRow", "QueryContext", "QueryRowContext"], writes: &["Exec", "ExecContext"] },
+    Orm { name: "ent", lang: "Go", libs: &["entgo.io"], model_bases: &[], model_attrs: &[], handles: &["ent.Client", "ent.Tx"],
+          reads: &["Query", "All", "Only", "First", "Count", "Exist", "Get", "IDs"],
+          writes: &["Create", "Update", "UpdateOne", "Delete", "DeleteOne", "Save", "Exec"] },
+    Orm { name: "Bun", lang: "Go", libs: &["uptrace/bun"], model_bases: &[], model_attrs: &[], handles: &["bun.DB", "bun.Tx"],
+          reads: &["NewSelect", "Scan", "ScanAndCount", "Count", "Exists"], writes: &["NewInsert", "NewUpdate", "NewDelete", "Exec"] },
+    Orm { name: "SQLx", lang: "Rust", libs: &["sqlx"], model_bases: &[], model_attrs: &[],
+          handles: &["PgPool", "MySqlPool", "SqlitePool", "PgConnection", "MySqlConnection", "SqliteConnection", "Pool", "Transaction"],
+          reads: &["fetch_all", "fetch_one", "fetch_optional", "fetch"], writes: &["execute"] },
+    Orm { name: "Diesel", lang: "Rust", libs: &["diesel"], model_bases: &[], model_attrs: &["Queryable", "Insertable", "Identifiable", "AsChangeset"],
+          handles: &["PgConnection", "MysqlConnection", "SqliteConnection", "Pool"],
+          reads: &["load", "first", "get_result", "get_results"], writes: &["execute"] },
+    Orm { name: "SeaORM", lang: "Rust", libs: &["sea_orm"], model_bases: &[], model_attrs: &["DeriveEntityModel"],
+          handles: &["DatabaseConnection", "DatabaseTransaction"],
+          reads: &["all", "one", "count", "paginate"], writes: &["insert", "update", "delete", "save", "exec"] },
+    Orm { name: "Eloquent", lang: "PHP", libs: &["Illuminate\\Database\\Eloquent"], model_bases: &["Model", "Authenticatable", "Pivot"], model_attrs: &[], handles: &[],
+          reads: &["where", "find", "first", "get", "all", "count", "pluck", "findOrFail", "firstOrFail", "paginate", "with", "orderBy", "exists", "select"],
+          writes: &["create", "save", "update", "delete", "destroy", "insert", "updateOrCreate", "firstOrCreate", "forceDelete"] },
+    Orm { name: "Doctrine", lang: "PHP", libs: &["Doctrine\\ORM"], model_bases: &[],
+          model_attrs: &["#[ORM\\Entity", "@ORM\\Entity", "@Entity"], handles: &["EntityManagerInterface", "EntityManager", "ObjectManager"],
+          reads: &["find", "findAll", "findBy", "findOneBy", "createQueryBuilder", "getResult", "getOneOrNullResult", "getSingleResult", "createQuery"],
+          writes: &["persist", "remove", "flush", "merge"] },
+    Orm { name: "PDO", lang: "PHP", libs: &["PDO"], model_bases: &[], model_attrs: &[], handles: &["PDO"], reads: &["query", "prepare"], writes: &["exec"] },
 ];

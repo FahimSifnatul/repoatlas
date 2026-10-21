@@ -1156,3 +1156,160 @@ fn sqlalchemy_session() {
     assert_eq!(labels(r("GET")), ["reads User"]);
     assert_eq!(labels(r("POST")), ["writes database"]); // the model is not named in the call
 }
+
+// ---------------------------------------------------------------- tier 1 frameworks and ORMs
+
+fn one_route_set(files: &[(&str, &str)]) -> (Value, Vec<String>) {
+    let d = analyze(files);
+    let r = route_paths(&procs(&d)[0]);
+    (d, r)
+}
+
+#[test]
+fn python_frameworks() {
+    // Flask blueprint with a url_prefix, mounted on the app
+    let (_, r) = one_route_set(&[
+        ("main.py", "from flask import Flask\nfrom api import bp\n\napp = Flask(__name__)\napp.register_blueprint(bp)\n\nif __name__ == \"__main__\":\n    app.run()\n"),
+        ("api.py", "from flask import Blueprint\n\nbp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n\n@bp.route(\"/users\")\ndef users():\n    return []\n"),
+    ]);
+    assert_eq!(r, ["ANY /api/users"]);
+    // Litestar: a bare decorator
+    let (_, r) = one_route_set(&[("main.py", "from litestar import Litestar, get\n\n@get(\"/users\")\nasync def users() -> list:\n    return []\n\napp = Litestar([users])\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(r, ["GET /users"]);
+    // Starlette: a Route object in a list
+    let (d, r) = one_route_set(&[("main.py", "from starlette.applications import Starlette\nfrom starlette.routing import Route\n\nasync def users(request):\n    return 1\n\napp = Starlette(routes=[Route(\"/users\", users)])\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(r, ["ANY /users"]);
+    assert_eq!(route_first(&d, "/users").as_deref(), Some("users()"));
+    // Flask: a view function handed over by keyword
+    let (d, r) = one_route_set(&[("main.py", "from flask import Flask\n\napp = Flask(__name__)\n\ndef users():\n    return 1\n\napp.add_url_rule(\"/users\", view_func=users)\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(r, ["ANY /users"]);
+    assert_eq!(route_first(&d, "/users").as_deref(), Some("users()"));
+    // Django REST framework: a viewset registered on a router is five endpoints
+    let (d, r) = one_route_set(&[
+        ("main.py", "import urls\nimport views\n\nif __name__ == \"__main__\":\n    urls.router\n"),
+        ("urls.py", "from rest_framework.routers import DefaultRouter\nfrom views import UserViewSet\n\nrouter = DefaultRouter()\nrouter.register(r\"users\", UserViewSet)\nurlpatterns = router.urls\n"),
+        ("views.py", "from rest_framework import viewsets\n\nclass UserViewSet(viewsets.ModelViewSet):\n    def list(self, request):\n        return 1\n"),
+    ]);
+    assert_eq!(r, ["DELETE /users/{pk}/", "GET /users/", "GET /users/{pk}/", "POST /users/", "PUT /users/{pk}/"]);
+    assert_eq!(route_first(&d, "/users/").as_deref(), Some("UserViewSet.list()"));
+}
+
+#[test]
+fn python_orms() {
+    let routes = |models: &[(&str, &str)], body: &str| {
+        let mut files: Vec<(&str, &str)> = vec![("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n")];
+        files.extend_from_slice(models);
+        let main = format!("from fastapi import FastAPI\nfrom models import User\n\napp = FastAPI()\n\n@app.get(\"/x\")\nasync def x():\n{body}\n");
+        let mut all = files.clone();
+        all.push(("main.py", main.as_str()));
+        db_steps(&analyze(&all), "/x")
+    };
+    // Peewee
+    let got = routes(&[("models.py", "import peewee\n\nclass User(peewee.Model):\n    name = peewee.CharField()\n")], "    User.create(name='x')\n    return User.select().where(User.id == 1).get()");
+    assert_eq!(got, ["writes User", "reads User"]);
+    // Tortoise
+    let got = routes(&[("models.py", "from tortoise.models import Model\n\nclass User(Model):\n    pass\n")], "    await User.create(name='x')\n    return await User.filter(id=1).first()");
+    assert_eq!(got, ["writes User", "reads User"]);
+    // SQLModel: a model, and a session handed in
+    let got = routes(&[("models.py", "from sqlmodel import SQLModel\n\nclass User(SQLModel, table=True):\n    pass\n")], "    return User.model_validate({})");
+    assert_eq!(got, Vec::<String>::new()); // SQLModel has no query methods on the class: no invented step
+}
+
+#[test]
+fn go_frameworks() {
+    let go = |imports: &str, body: &str| {
+        let src = format!("package main\n\nimport (\n\t\"net/http\"\n{imports})\n\nfunc main() {{\n{body}}}\n\nfunc listUsers() {{}}\n");
+        let d = analyze(&[("main.go", src.as_str())]);
+        (route_paths(&procs(&d)[0]), route_first(&d, &route_paths(&procs(&d)[0]).first().map(|r| r.split(' ').nth(1).unwrap().to_string()).unwrap_or_default()))
+    };
+    // Gin: a group, then the route
+    let (r, first) = go("\t\"github.com/gin-gonic/gin\"\n", "\tr := gin.Default()\n\tv1 := r.Group(\"/v1\")\n\tv1.GET(\"/users\", listUsers)\n\tr.Run()\n");
+    assert_eq!((r, first.as_deref()), (vec!["GET /v1/users".to_string()], Some("listUsers()")));
+    // Echo
+    let (r, _) = go("\t\"github.com/labstack/echo/v4\"\n", "\te := echo.New()\n\te.GET(\"/users\", listUsers)\n\te.Start(\":80\")\n");
+    assert_eq!(r, ["GET /users"]);
+    // Fiber
+    let (r, _) = go("\t\"github.com/gofiber/fiber/v2\"\n", "\tapp := fiber.New()\n\tapp.Get(\"/users\", listUsers)\n\tapp.Listen(\":80\")\n");
+    assert_eq!(r, ["GET /users"]);
+    // gorilla/mux: the verb comes after the call
+    let (r, first) = go("\t\"github.com/gorilla/mux\"\n", "\tr := mux.NewRouter()\n\tr.HandleFunc(\"/users\", listUsers).Methods(\"GET\")\n\thttp.ListenAndServe(\":80\", r)\n");
+    assert_eq!((r, first.as_deref()), (vec!["GET /users".to_string()], Some("listUsers()")));
+}
+
+#[test]
+fn go_orms() {
+    let steps = |imports: &str, body: &str| {
+        let src = format!("package main\n\nimport (\n{imports})\n\nfunc main() {{ run(nil) }}\n\nfunc run(db {body}\n");
+        db_steps(&analyze(&[("main.go", src.as_str())]), "")
+    };
+    // GORM: a query chain ending in a read, then a create
+    // (the created value is a struct that embeds gorm.Model: a model the call names)
+    let got = steps("\t\"gorm.io/gorm\"\n", "*gorm.DB) {\n\tvar users []User\n\tdb.Where(\"name = ?\", \"x\").Find(&users)\n\tdb.Create(&User{})\n}\n\ntype User struct {\n\tgorm.Model\n}\n");
+    assert_eq!(got, ["reads database", "writes User"]);
+    // sqlx
+    let got = steps("\t\"github.com/jmoiron/sqlx\"\n", "*sqlx.DB) {\n\tvar n int\n\tdb.Get(&n, \"SELECT count(*) FROM t\")\n\tdb.MustExec(\"DELETE FROM t\")\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // database/sql
+    let got = steps("\t\"database/sql\"\n", "*sql.DB) {\n\tdb.QueryRow(\"SELECT 1\")\n\tdb.Exec(\"DELETE FROM t\")\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+}
+
+#[test]
+fn rust_frameworks() {
+    // Rocket: an attribute with a typed segment
+    let (_, r) = one_route_set(&[("src/main.rs", "#[get(\"/users/<id>\")]\nfn user(id: u32) {}\n\nfn main() {}\n")]);
+    assert_eq!(r, ["GET /users/<id>"]);
+    // Poem: .at(path, get(handler))
+    let (d, r) = one_route_set(&[("src/main.rs", "use poem::{get, Route};\n\nfn main() {\n    let app = Route::new().at(\"/users\", get(list_users));\n}\n\nfn list_users() {}\n")]);
+    assert_eq!(r, ["GET /users"]);
+    assert_eq!(route_first(&d, "/users").as_deref(), Some("list_users()"));
+}
+
+#[test]
+fn rust_orms() {
+    let steps = |src: &str| db_steps(&analyze(&[("src/main.rs", src)]), "");
+    // SQLx: the pool is an argument of the call that runs the query
+    let got = steps("use sqlx::PgPool;\n\nfn main() { read(todo!()); write(todo!()); }\n\nasync fn read(pool: &PgPool) {\n    sqlx::query(\"SELECT 1\").fetch_all(pool).await;\n}\n\nasync fn write(pool: &PgPool) {\n    sqlx::query(\"DELETE FROM t\").execute(pool).await;\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // Diesel: a table, then load with the connection
+    let got = steps("use diesel::prelude::*;\n\nfn main() { read(todo!()); write(todo!()); }\n\nfn read(conn: &mut PgConnection) {\n    users.filter(id.eq(1)).load::<User>(conn);\n}\n\nfn write(conn: &mut PgConnection) {\n    diesel::insert_into(users).values(&u).execute(conn);\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // SeaORM
+    let got = steps("use sea_orm::DatabaseConnection;\n\nfn main() { read(todo!()); }\n\nasync fn read(db: &DatabaseConnection) {\n    User::find().all(db).await;\n}\n");
+    assert_eq!(got, ["reads database"]);
+}
+
+#[test]
+fn php_frameworks() {
+    // Laravel: a resource controller is five endpoints, each to its method
+    let (d, r) = one_route_set(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../routes/web.php';\n"),
+        ("routes/web.php", "<?php\nRoute::apiResource('photos', PhotoController::class);\n"),
+        ("app/Http/Controllers/PhotoController.php", "<?php\nclass PhotoController {\n    public function index() {}\n    public function show($id) {}\n}\n"),
+    ]);
+    assert_eq!(r, ["DELETE /photos/{id}", "GET /photos", "GET /photos/{id}", "POST /photos", "PUT /photos/{id}"]);
+    assert_eq!(route_first(&d, "/photos").as_deref(), Some("PhotoController.index()"));
+    // Slim: a closure handler
+    let (_, r) = one_route_set(&[("public/index.php", "<?php\n$app->get('/users', function ($req, $res) { return $res; });\n$app->run();\n")]);
+    assert_eq!(r, ["GET /users"]);
+}
+
+#[test]
+fn php_orms() {
+    let steps = |files: &[(&str, &str)]| db_steps(&analyze(files), "");
+    // Eloquent
+    let got = steps(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../src/repo.php';\nfind_user();\nmake_user();\n"),
+        ("src/repo.php", "<?php\nuse Illuminate\\Database\\Eloquent\\Model;\n\nclass User extends Model {}\n\nfunction find_user() { return User::where('id', 1)->first(); }\n\nfunction make_user() { return User::create(['name' => 'x']); }\n"),
+    ]);
+    assert_eq!(got, ["reads User", "writes User"]);
+    // Doctrine: an entity marked by an attribute, a manager held in a property
+    let got = steps(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../src/repo.php';\nsave_post();\nall_posts();\n"),
+        ("src/repo.php", "<?php\nuse Doctrine\\ORM\\EntityManagerInterface;\n\n#[ORM\\Entity]\nclass Post {}\n\nclass Repo {\n    public function __construct(private EntityManagerInterface $em) {}\n    public function store($p) { $this->em->persist($p); $this->em->flush(); }\n    public function all() { return $this->em->getRepository(Post::class)->findAll(); }\n}\n\nfunction save_post() { (new Repo(null))->store(1); }\n\nfunction all_posts() { return (new Repo(null))->all(); }\n"),
+    ]);
+    assert!(got.contains(&"writes database".to_string()) && got.contains(&"reads Post".to_string()), "{got:?}");
+    // PDO
+    let got = steps(&[("public/index.php", "<?php\nfunction q(PDO $pdo) { return $pdo->query('SELECT 1'); }\nq(null);\n")]);
+    assert_eq!(got, ["reads database"]);
+}
