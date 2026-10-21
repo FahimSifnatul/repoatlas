@@ -719,6 +719,11 @@ fn imports(f: &mut File) {
             f.imports = JVM_IMPORT.captures_iter(t).map(|c| c[1].trim_end_matches('.').to_string()).collect();
             f.aliases = f.imports.iter().map(|i| i.rsplit('.').next().unwrap_or("").to_string()).collect();
         }
+        Resolver::Php => {
+            static PHP_USE: LazyLock<Regex> = LazyLock::new(|| rx(r"(?m)^\s*use\s+(?:function\s+|const\s+)?\\?([\w\\]+)(?:\s+as\s+\w+)?\s*;"));
+            f.imports = PHP_USE.captures_iter(t).map(|c| c[1].to_string()).collect();
+            f.aliases = f.imports.iter().map(|i| i.rsplit('\\').next().unwrap_or("").to_string()).collect();
+        }
         Resolver::C => f.imports = C_INCLUDE.captures_iter(t).map(|c| c[1].to_string()).collect(),
         Resolver::None => {}
     }

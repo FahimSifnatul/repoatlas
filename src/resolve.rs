@@ -76,6 +76,8 @@ pub struct Project {
     rust_crates: BTreeMap<String, String>,
     jvm_fq: HashMap<String, String>,
     jvm_own: HashSet<String>,
+    /// composer.json autoload: (namespace prefix `App\\`, folder `app`), longest prefix first
+    php_psr4: Vec<(String, String)>,
     locs: HashMap<String, usize>,
 }
 
@@ -97,7 +99,7 @@ impl Project {
         let mut p = Project {
             root: root.to_path_buf(), paths, dirs, man, declared: vec![], py_roots: vec![], js_pkgs: BTreeMap::new(),
             js_dirnames: HashSet::new(), go_modules: BTreeMap::new(), go_packages: HashMap::new(), rust_crates: BTreeMap::new(),
-            jvm_fq: HashMap::new(), jvm_own: HashSet::new(), locs: files.iter().map(|f| (f.path.clone(), f.loc)).collect(),
+            jvm_fq: HashMap::new(), jvm_own: HashSet::new(), php_psr4: vec![], locs: files.iter().map(|f| (f.path.clone(), f.loc)).collect(),
         };
         let used: HashSet<Resolver> = files.iter().map(|f| f.lang.resolver).collect();
         if used.contains(&Resolver::Python) {
@@ -115,6 +117,9 @@ impl Project {
         if used.contains(&Resolver::Jvm) {
             p.prepare_jvm(files);
         }
+        if used.contains(&Resolver::Php) {
+            p.prepare_php();
+        }
         p
     }
 
@@ -125,6 +130,7 @@ impl Project {
             Resolver::Go => self.resolve_go(f),
             Resolver::Rust => self.resolve_rust(f),
             Resolver::Jvm => self.resolve_jvm(f),
+            Resolver::Php => self.resolve_php(f),
             Resolver::C => self.resolve_c(f),
             Resolver::None => Default::default(),
         }
@@ -624,6 +630,45 @@ impl Project {
             }
         }
         (uses, ext)
+    }
+
+    // ---------------------------------------------------------------- PHP
+
+    fn prepare_php(&mut self) {
+        for rel in self.man.get("composer.json").cloned().unwrap_or_default() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&self.read(&rel)) else { continue };
+            for section in ["autoload", "autoload-dev"] {
+                let Some(map) = v[section]["psr-4"].as_object() else { continue };
+                for (ns, dirs) in map {
+                    let dirs: Vec<&str> = match dirs {
+                        serde_json::Value::String(s) => vec![s.as_str()],
+                        serde_json::Value::Array(a) => a.iter().filter_map(|d| d.as_str()).collect(),
+                        _ => vec![],
+                    };
+                    for d in dirs {
+                        self.php_psr4.push((ns.clone(), normpath(&join(dirname(&rel), d))));
+                    }
+                }
+            }
+        }
+        self.php_psr4.sort_by_key(|(ns, _)| std::cmp::Reverse(ns.len()));
+    }
+
+    /// `use App\Models\User;` -> the file the composer.json autoload rules put that class in
+    fn resolve_php(&self, f: &File) -> Uses {
+        let mut uses = BTreeSet::new();
+        for imp in &f.imports {
+            for (ns, dir) in self.php_psr4.iter().filter(|(ns, _)| imp.starts_with(ns.as_str())) {
+                let p = normpath(&join(dir, &format!("{}.php", imp[ns.len()..].replace('\\', "/"))));
+                if self.paths.contains(&p) {
+                    if p != f.path {
+                        uses.insert(p);
+                    }
+                    break;
+                }
+            }
+        }
+        (uses, BTreeSet::new())
     }
 
     // ---------------------------------------------------------------- C / C++

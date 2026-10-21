@@ -1085,3 +1085,17 @@ fn same_router_name_two_files() {
     ]);
     assert_eq!(route_paths(&procs(&d)[0]), ["GET /one/x", "GET /two/y"]);
 }
+
+// ---------------------------------------------------------------- php namespaces
+
+#[test]
+fn php_use_follows_psr4() {
+    let d = analyze(&[
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "app/"}}}"#),
+        ("app/Http/Controllers/UserController.php", "<?php\nnamespace App\\Http\\Controllers;\n\nuse App\\Models\\User;\n\nclass UserController {\n    public function index() { return User::all(); }\n}\n"),
+        ("app/Models/User.php", "<?php\nnamespace App\\Models;\n\nclass User {}\n"),
+        ("app/Legacy/User.php", "<?php\nnamespace App\\Legacy;\n\nclass User {}\n"),
+    ]);
+    // two classes are called User: the `use` line says which one
+    assert_eq!(uses(&d, "app/Http/Controllers/UserController.php"), ["app/Models/User.php"]);
+}

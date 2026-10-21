@@ -26,6 +26,7 @@ pub enum Resolver {
     Go,
     Rust,
     Jvm,
+    Php,
     C,
 }
 
@@ -117,7 +118,8 @@ pub static LANGS: &[Lang] = &[
     Lang { name: "Ruby", exts: &[".rb", ".ru", ".rake"], interpreters: &["ruby"], color: "#701516", grammar: Some("ruby"),
            entry_re: &[r"(?m)^if\s+(?:__FILE__\s*==\s*\$(?:0|PROGRAM_NAME)|\$(?:0|PROGRAM_NAME)\s*==\s*__FILE__)"],
            implicit_this: true, ..BASE },
-    Lang { name: "PHP", exts: &[".php"], interpreters: &["php"], color: "#4F5D95", grammar: Some("php"), ..BASE },
+    Lang { name: "PHP", exts: &[".php"], interpreters: &["php"], color: "#4F5D95", manifests: &["composer.json"], grammar: Some("php"),
+           resolver: Resolver::Php, ..BASE },
     Lang { name: "Swift", exts: &[".swift"], color: "#F05138", grammar: Some("swift"), entry_re: &[r"(?m)^\s*@main\b"],
            implicit_this: true, ..BASE },
     Lang { name: "Scala", exts: &[".scala"], color: "#c22d40", grammar: Some("scala"),
