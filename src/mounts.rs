@@ -274,6 +274,14 @@ pub fn build(files: &[File]) -> Mounts {
                 m.scopes.push(Scope { file: fi, from: c.from, to: end, path: ev.eval(&format!("\"{}\"", &p[1])) });
             }
         }
+        // routers nested in a chain that has a path: `Router::with_path("api").push(Router::with_path("users").get(list))`
+        if let Some(ch) = crate::rules::chain_of(f.lang.name) {
+            for c in f.calls.iter().filter(|c| !c.is_ref && ch.nests.contains(&c.name.as_str())) {
+                if let Some(p) = crate::parse::chain_path(f.lang.name, &c.recv) {
+                    m.scopes.push(Scope { file: fi, from: c.at, to: c.end.min(f.bare.len()), path: ev.eval(&format!("\"{p}\"")) });
+                }
+            }
+        }
     }
     m
 }

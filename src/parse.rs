@@ -99,6 +99,50 @@ pub fn handler_of(expr: &str) -> Option<(String, String)> {
     })
 }
 
+/// The path a chain of router calls sets for the call made on it: `app.at("/x")` -> "/x", `Router::with_path("x").get(a)` -> "x".
+/// Walks back over routes registered on the chain and routers nested in it; any other call ends it (none).
+pub fn chain_path(lang: &str, recv: &str) -> Option<String> {
+    static ONE_STRING: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*"([^"]*)"\s*$"#));
+    let ch = crate::rules::chain_of(lang)?;
+    let mut s = recv.trim_end();
+    loop {
+        let body = s.strip_suffix(')')?;
+        // the parenthesis that opens the last call
+        let b = body.as_bytes();
+        let (mut depth, mut i, mut quoted) = (0i32, b.len(), false);
+        let open = loop {
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+            match b[i] {
+                b'"' => quoted = !quoted,
+                b')' if !quoted => depth += 1,
+                b'(' if !quoted && depth == 0 => break i,
+                b'(' if !quoted => depth -= 1,
+                _ => {}
+            }
+        };
+        let head = body[..open].trim_end();
+        let rest = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+        let name = &head[rest.len()..];
+        let rest = rest.trim_end();
+        let rest = rest.strip_suffix('.').or_else(|| rest.strip_suffix("::"))?;
+        if ch.paths.contains(&name) {
+            return ONE_STRING.captures(&body[open + 1..]).map(|c| c[1].to_string());
+        }
+        if !(ch.verbs.contains(&name) || ch.routes.contains(&name) || ch.nests.contains(&name)) {
+            return None;
+        }
+        s = rest.trim_end();
+    }
+}
+
+/// a route's own path under the path of the chain it is registered on
+fn under(chain: &str, own: &str) -> String {
+    if own.trim_matches('/').is_empty() { crate::mounts::join_path(&[chain]) } else { crate::mounts::join_path(&[chain, own]) }
+}
+
 #[derive(Clone, Debug)]
 pub struct Symbol {
     pub k: &'static str,
@@ -581,12 +625,26 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 }
             }
         }
+        // a router chain: `app.at("/x").get(h)`, `Routes::new().prefix("x").add("/", get(h))` (languages listed in rules::CHAINS)
+        let chain = crate::rules::chain_of(f.lang.name);
+        let on_chain = chain.and_then(|_| chain_path(f.lang.name, recv));
+        let chain_root = || recv.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("").to_string();
+        if let (Some(ch), Some(on)) = (chain, &on_chain) {
+            let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
+            if ch.verbs.contains(&name.as_str()) && args.len() == 1 && !args[0].trim_start().starts_with(['"', '\'']) {
+                f.routes.push(Route {
+                    verb: name.to_uppercase(), path: under(on, ""), line, at: callee.start_byte(), end: node.end_byte(), def,
+                    recv: chain_root(), handler: args[0].clone(), name: String::new(),
+                });
+            }
+        }
         if ROUTE_CALLS.contains(&name.as_str()) && (recv.is_empty() || !ROUTE_BARE.contains(&name.as_str()))
             || recv.is_empty() && ROUTE_BARE.contains(&name.as_str())
-            || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str())) {
+            || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str()))
+            || on_chain.is_some() && chain.is_some_and(|ch| ch.routes.contains(&name.as_str())) {
             static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
             static FIRST_ANY: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*r?['"`](?:([A-Z]+)\s+)?([^'"`]*)['"`]"#));
-            let re = if in_routes_file.is_some() { &FIRST_ANY } else { &FIRST };
+            let re = if in_routes_file.is_some() || on_chain.is_some() { &FIRST_ANY } else { &FIRST };
             if let Some(c) = re.captures(&src[callee.end_byte()..node.end_byte()]) {
                 let upper = name.trim_start_matches("add_").to_uppercase();
                 let verb = match c.get(1) {
@@ -601,7 +659,17 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     }
                 }
                 let path = if path.starts_with('/') { path } else { format!("/{path}") };
+                let path = match &on_chain {
+                    Some(on) => under(on, &path),
+                    None => path,
+                };
                 let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
+                // `app.at("/x").get(h)`: the call only sets the path of the routes chained after it
+                let sets_path = chain.is_some_and(|ch| {
+                    static NEXT: LazyLock<Regex> = LazyLock::new(|| rx(r"^\s*\.\s*(\w+)\s*\("));
+                    ch.paths.contains(&name.as_str()) && args.len() == 1
+                        && NEXT.captures(&src[node.end_byte()..]).is_some_and(|n| ch.verbs.contains(&&n[1]) || ch.routes.contains(&&n[1]) || ch.nests.contains(&&n[1]))
+                });
                 // the last argument that is not a keyword other than the one that names the handler
                 let handler = args.iter().skip(1).rev().find_map(|a| match crate::mounts::kwarg(a) {
                     Some((k, v)) => HANDLER_KWARGS.contains(&k).then(|| v.to_string()),
@@ -616,10 +684,11 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,
                     _ => verb,
                 };
-                if INCLUDE.is_match(&handler) {
+                if INCLUDE.is_match(&handler) || sets_path {
                     // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
                 } else {
-                    f.routes.push(Route { verb, path, line, at: callee.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler, name: String::new() });
+                    let recv = if on_chain.is_some() { chain_root() } else { recv.rsplit('.').next().unwrap_or("").to_string() };
+                    f.routes.push(Route { verb, path, line, at: callee.start_byte(), end: node.end_byte(), def, recv, handler, name: String::new() });
                 }
             }
         }

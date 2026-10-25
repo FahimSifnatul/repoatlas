@@ -110,6 +110,30 @@ pub static NAMED_ROUTE_ARGS: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*[
 pub static VIEW_ROUTE_NAME: LazyLock<Regex> = LazyLock::new(|| rx(r#"@[\w.]*view_config\([^)]*\broute_name\s*=\s*['"]([^'"]+)['"]"#));
 pub static VIEW_VERB: LazyLock<Regex> = LazyLock::new(|| rx(r#"@[\w.]*view_config\([^)]*\brequest_method\s*=\s*\(?\s*['"](\w+)['"]"#));
 
+/// A router built by a chain of calls, where one call sets the path the calls chained after it register under:
+/// Tide `app.at("/users").get(list)`, Salvo `Router::with_path("users").get(list)`, Loco `Routes::new().prefix("users").add("/", get(list))`
+pub struct Chain {
+    /// the language (lang::Lang.name)
+    pub lang: &'static str,
+    /// calls whose one string argument is the path of what is chained after them
+    pub paths: &'static [&'static str],
+    /// chained calls that register their one argument, a handler, under that path, for the verb they are named after
+    pub verbs: &'static [&'static str],
+    /// chained calls that register a route of their own (path, handler) under that path
+    pub routes: &'static [&'static str],
+    /// chained calls that put the routers in their arguments under that path: Salvo `Router::with_path("api").push(..)`
+    pub nests: &'static [&'static str],
+}
+
+pub static CHAINS: &[Chain] = &[
+    Chain { lang: "Rust", paths: &["at", "with_path", "path", "prefix"], verbs: &["get", "post", "put", "delete", "patch"], routes: &["add"], nests: &["push"] },
+];
+
+/// how routers are chained in files of that language, if they are
+pub fn chain_of(lang: &str) -> Option<&'static Chain> {
+    CHAINS.iter().find(|c| c.lang == lang)
+}
+
 /// whether a method of that name, in a file of that language, answers requests
 pub fn verb_method(lang: &str, name: &str) -> bool {
     VERB_METHODS.iter().any(|(l, ms)| (l.is_empty() || *l == lang) && ms.contains(&name))
@@ -258,6 +282,18 @@ pub static ORMS: &[Orm] = &[
     Orm { name: "SeaORM", lang: "Rust", libs: &["sea_orm"], model_bases: &[], model_attrs: &["DeriveEntityModel"],
           handles: &["DatabaseConnection", "DatabaseTransaction"],
           reads: &["all", "one", "count", "paginate"], writes: &["insert", "update", "delete", "save", "exec"], read_prefixes: &[], write_prefixes: &[] },
+    // the SQL text is not read: execute counts as a write, a query (or preparing one) as a read
+    Orm { name: "rusqlite", lang: "Rust", libs: &["rusqlite"], model_bases: &[], model_attrs: &[], handles: &["Connection", "Transaction"],
+          reads: &["query_row", "prepare", "prepare_cached"], writes: &["execute", "execute_batch"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "tokio-postgres", lang: "Rust", libs: &["tokio_postgres"], model_bases: &[], model_attrs: &[], handles: &["Client", "Transaction"],
+          reads: &["query", "query_one", "query_opt", "query_raw"], writes: &["execute", "batch_execute", "execute_raw"], read_prefixes: &[], write_prefixes: &[] },
+    // the functions crud! / impl_select! give a model take the handle: `Activity::select_all(&rb)`
+    Orm { name: "Rbatis", lang: "Rust", libs: &["rbatis"], model_bases: &[], model_attrs: &[], handles: &["RBatis", "Rbatis"],
+          reads: &["query_decode", "query", "select_all", "select_by_map", "select_by_column", "select_in_column", "select_page"],
+          writes: &["exec", "insert", "insert_batch", "update_by_map", "update_by_column", "delete_by_map", "delete_by_column", "delete_in_column"],
+          read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "MongoDB", lang: "Rust", libs: &["mongodb"], model_bases: &[], model_attrs: &[], handles: &["Collection"],
+          reads: MONGO_READS, writes: MONGO_WRITES, read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Eloquent", lang: "PHP", libs: &["Illuminate\\Database\\Eloquent"], model_bases: &["Model", "Authenticatable", "Pivot"], model_attrs: &[], handles: &[],
           reads: &["where", "find", "first", "get", "all", "count", "pluck", "findOrFail", "firstOrFail", "paginate", "with", "orderBy", "exists", "select"],
           writes: &["create", "save", "update", "delete", "destroy", "insert", "updateOrCreate", "firstOrCreate", "forceDelete"], read_prefixes: &[], write_prefixes: &[] },

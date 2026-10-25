@@ -1667,6 +1667,80 @@ fn rust_orms() {
 }
 
 #[test]
+fn more_rust_frameworks() {
+    // every route of a one-file program: "VERB /path handler"
+    let rs = |body: &str| {
+        let src = format!("{body}\n\nfn list() {{}}\n\nfn show() {{}}\n\nfn create() {{}}\n");
+        let d = analyze(&[("src/main.rs", src.as_str())]);
+        let routes = procs(&d)[0]["routes"].as_array().cloned().unwrap_or_default();
+        sorted(routes.iter().map(|r| {
+            let first = r["steps"].as_array().and_then(|s| s.first()).map(|s| s["n"].as_str().unwrap().to_string()).unwrap_or_default();
+            format!("{} {} {first}", r["verb"].as_str().unwrap(), r["path"].as_str().unwrap())
+        }).collect())
+    };
+    // Tide: verbs chained after the path, each with its handler; the path alone is no route
+    let r = rs("use tide::Request;\n\nfn main() {\n    let mut app = tide::new();\n    app.at(\"/users/:id\").get(show).post(create);\n    app.listen(\"127.0.0.1:8080\");\n}");
+    assert_eq!(r, ["GET /users/:id show()", "POST /users/:id create()"]);
+    // Salvo: a router with a path, its verbs chained, nested under another router's path by push
+    let r = rs("use salvo::prelude::*;\n\nfn main() {\n    let router = Router::with_path(\"api\")\n        .push(Router::with_path(\"users\").get(list).post(create))\n        .push(Router::with_path(\"users/<id>\").get(show));\n    serve(router);\n}");
+    assert_eq!(r, ["GET /api/users list()", "GET /api/users/<id> show()", "POST /api/users create()"]);
+    // Loco: a prefix, then routes added under it with the verb wrapping the handler
+    let r = rs("use loco_rs::prelude::*;\n\nfn main() {\n    routes();\n}\n\npub fn routes() -> Routes {\n    Routes::new()\n        .prefix(\"users\")\n        .add(\"/\", get(list))\n        .add(\"/:id\", get(show))\n        .add(\"/\", post(create))\n}");
+    assert_eq!(r, ["GET /users list()", "GET /users/:id show()", "POST /users create()"]);
+    // Warp: a filter chain names its path in a macro and its verb in a filter; it is not read, so no route is claimed
+    let r = rs("use warp::Filter;\n\nfn main() {\n    let users = warp::path!(\"users\" / u32).and(warp::get()).and_then(show);\n    warp::serve(users);\n}");
+    assert_eq!(r, Vec::<String>::new());
+    // a lookup or a builder that is not a router makes no route, even after a path-like call
+    let r = rs("use tide::Request;\n\nfn main() {\n    let m = std::collections::HashMap::new();\n    m.get(list);\n    url.join(\"/a\").get(show);\n    cfg.path(\"a\").clone().get(show);\n}");
+    assert_eq!(r, Vec::<String>::new());
+    // each library is listed under what it is
+    for (lib, label) in [("salvo", "Web framework"), ("tide", "Web framework"), ("loco_rs", "Web framework")] {
+        let d = analyze(&[("src/main.rs", format!("use {lib}::prelude::*;\n\nfn main() {{}}\n").as_str())]);
+        let labels: Vec<&str> = d["repo"]["stack"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, [label], "{lib}");
+    }
+}
+
+#[test]
+fn rust_chain_routes_stay_in_rust() {
+    // the same chains in JavaScript and Python are not routes: the chain reading is Rust's
+    let d = analyze(&[("server.js", "const express = require('express')\nconst app = express()\napp.at('/users').get(show)\nRoutes.prefix('api').add('/x', get(show))\napp.listen(3000)\nfunction show() {}\n")]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["ANY /users"]);
+    let d = analyze(&[("main.py", "from flask import Flask\n\napp = Flask(__name__)\nrouter.prefix(\"api\").add(\"/x\", get(show))\n\ndef show():\n    return 1\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(route_paths(&procs(&d)[0]), Vec::<String>::new());
+}
+
+#[test]
+fn more_rust_orms() {
+    let steps = |src: &str| db_steps(&analyze(&[("src/main.rs", src)]), "");
+    // rusqlite: query_row and prepare read, execute and execute_batch write
+    let got = steps("use rusqlite::{params, Connection};\n\nfn main() { read(todo!()); write(todo!()); }\n\nfn read(conn: &Connection) {\n    conn.query_row(\"SELECT 1\", [], |r| r.get(0));\n    let mut stmt = conn.prepare(\"SELECT id FROM t\").unwrap();\n}\n\nfn write(conn: &Connection) {\n    conn.execute(\"DELETE FROM t\", params![]);\n    conn.execute_batch(\"VACUUM\");\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // tokio-postgres: a client and a transaction
+    let got = steps("use tokio_postgres::{Client, Transaction};\n\nfn main() { read(todo!()); write(todo!()); }\n\nasync fn read(client: &Client) {\n    client.query_one(\"SELECT 1\", &[]).await;\n    client.query_opt(\"SELECT 1\", &[]).await;\n}\n\nasync fn write(tx: Transaction<'_>) {\n    tx.batch_execute(\"DELETE FROM t\").await;\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // Rbatis: raw SQL on the handle, and the model functions crud! defines, which take the handle
+    let got = steps("use rbatis::RBatis;\n\nfn main() { read(todo!()); write(todo!()); }\n\nasync fn read(rb: &RBatis) {\n    let n: i64 = rb.query_decode(\"SELECT count(1) FROM t\", vec![]).await.unwrap();\n    Activity::select_all(rb).await;\n}\n\nasync fn write(rb: &RBatis) {\n    Activity::insert(rb, &a).await;\n    Activity::delete_by_map(rb, value!{\"id\": 1}).await;\n}\n\ncrud!(Activity {});\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    let got = steps("use rbatis::RBatis;\n\nfn main() { write(todo!()); }\n\nasync fn write(rb: &RBatis) {\n    rb.exec(\"DELETE FROM t\", vec![]).await;\n}\n");
+    assert_eq!(got, ["writes database"]);
+    // mongodb: a typed collection
+    let got = steps("use mongodb::Collection;\n\nfn main() { read(todo!()); write(todo!()); }\n\nasync fn read(users: Collection<User>) {\n    users.find_one(doc! { \"id\": 1 }).await;\n    users.count_documents(doc! {}).await;\n}\n\nasync fn write(users: Collection<User>) {\n    users.insert_one(u).await;\n    users.find_one_and_update(f, u).await;\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // values that are not a session add no step, even in a file written for these crates
+    for lib in ["rusqlite::Connection", "tokio_postgres::Client", "rbatis::RBatis", "mongodb::Collection"] {
+        let got = steps(&format!("use {lib};\nuse std::collections::{{HashMap, HashSet}};\n\nfn main() {{ run(); }}\n\nfn run() {{\n    let map: HashMap<u32, u32> = HashMap::new();\n    map.get(&k);\n    v.iter();\n    cache.remove(&k);\n    set.insert(x);\n    map.insert(1, 2);\n    items.update(x);\n    job.execute(x);\n}}\n"));
+        assert_eq!(got, Vec::<String>::new(), "{lib}");
+    }
+    // each library is listed under what it is
+    for lib in ["rusqlite", "tokio_postgres", "rbatis", "mongodb"] {
+        let d = analyze(&[("src/main.rs", format!("use {lib}::Thing;\n\nfn main() {{}}\n").as_str())]);
+        let labels: Vec<&str> = d["repo"]["stack"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Database"], "{lib}");
+    }
+}
+
+#[test]
 fn php_frameworks() {
     // Laravel: a resource controller is five endpoints, each to its method
     let (d, r) = one_route_set(&[
