@@ -1724,6 +1724,24 @@ fn a_crate_qualified_handle_type_belongs_to_its_crate() {
 }
 
 #[test]
+fn a_diesel_pool_wrapped_by_another_crate_is_a_session() {
+    let steps = |src: &str| db_steps(&analyze(&[("src/main.rs", src)]), "");
+    // r2d2 and bb8 wrap Diesel's connection: the pool handed to the query is still the session
+    for pool in ["r2d2::Pool<ConnectionManager<PgConnection>>", "bb8::Pool<AsyncDieselConnectionManager<AsyncPgConnection>>"] {
+        let got = steps(&format!("use diesel::prelude::*;\n\nfn main() {{ run(todo!()); }}\n\nfn run(pool: &{pool}) {{\n    users.load::<User>(&mut pool.get().unwrap());\n}}\n"));
+        assert_eq!(got, ["reads database"], "{pool}");
+    }
+    // the same wrapper in a file not written for Diesel is nothing
+    for lib in ["sqlx::Row", "rusqlite::params"] {
+        let got = steps(&format!("use {lib};\n\nfn main() {{ run(todo!()); }}\n\nfn run(pool: &r2d2::Pool<M>) {{\n    sqlx::query(\"SELECT 1\").fetch_all(pool);\n    pool.execute(\"x\");\n    pool.query_row(\"y\");\n}}\n"));
+        assert_eq!(got, Vec::<String>::new(), "{lib}");
+    }
+    // a wrapper crate is not a crate path for every type: another crate's Client is still not Diesel's
+    let got = steps("use diesel::prelude::*;\nuse tokio_postgres::Client;\n\nfn main() { run(todo!()); }\n\nasync fn run(http: &reqwest::Client) {\n    http.execute(req).await;\n}\n");
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
 fn rust_chain_routes_stay_in_rust() {
     // the same chains in JavaScript and Python are not routes: the chain reading is Rust's
     let d = analyze(&[("server.js", "const express = require('express')\nconst app = express()\napp.at('/users').get(show)\nRoutes.prefix('api').add('/x', get(show))\napp.listen(3000)\nfunction show() {}\n")]);

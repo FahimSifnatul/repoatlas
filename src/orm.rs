@@ -156,10 +156,11 @@ pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String,
                 format!(r"(\$?\w+)\s*:?=\s*(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
             ];
             // `http: reqwest::Client`: a type named through a crate path is this ORM's only when the crate is
-            // (a path inside the project, `crate::db::Pool`, says nothing either way)
+            // or wraps its handle (`r2d2::Pool`); a path inside the project, `crate::db::Pool`, says nothing either way
             let own_crate = |q: &str| {
                 let Some((first, _)) = q.split_once("::") else { return true };
-                ["crate", "self", "super"].contains(&first) || o.libs.iter().any(|l| l.replace('-', "_") == first.replace('-', "_"))
+                let first = first.replace('-', "_");
+                ["crate", "self", "super"].contains(&first.as_str()) || o.libs.iter().chain(o.pools).any(|l| l.replace('-', "_") == first)
             };
             for re in forms {
                 for c in Regex::new(&re).unwrap().captures_iter(&f.code) {
