@@ -1787,6 +1787,199 @@ fn more_rust_orms() {
     }
 }
 
+/// every route of the first program: "VERB /path first-step" (no step: nothing after the path), sorted
+fn route_heads(d: &Value) -> Vec<String> {
+    sorted(procs(d)[0]["routes"].as_array().cloned().unwrap_or_default().iter().map(|r| {
+        let first = r["steps"].as_array().and_then(|s| s.first()).map(|s| s["n"].as_str().unwrap().to_string()).unwrap_or_default();
+        format!("{} {} {first}", r["verb"].as_str().unwrap(), r["path"].as_str().unwrap()).trim_end().to_string()
+    }).collect())
+}
+
+#[test]
+fn more_javascript_frameworks() {
+    let handlers = "\nfunction list(req, res) {}\nfunction show(req, res) {}\nfunction create(req, res) {}\n";
+    let js = |body: &str| route_heads(&analyze(&[("server.js", format!("{body}{handlers}").as_str())]));
+    // Express: a router mounted under a path
+    let r = js("const express = require('express')\nconst app = express()\nconst router = express.Router()\nrouter.get('/:id', show)\napp.use('/users', router)\napp.post('/login', create)\napp.listen(3000)\n");
+    assert_eq!(r, ["GET /users/:id show()", "POST /login create()"]);
+    // Koa: @koa/router with a prefix of its own, its routes handed to the app
+    let r = js("const Koa = require('koa')\nconst Router = require('@koa/router')\nconst app = new Koa()\nconst router = new Router({ prefix: '/api' })\nrouter.get('/users', list)\nrouter.post('/users/:id', create)\napp.use(router.routes())\napp.listen(3000)\n");
+    assert_eq!(r, ["GET /api/users list()", "POST /api/users/:id create()"]);
+    // Fastify: routes on the instance
+    let r = js("const fastify = require('fastify')({ logger: true })\nfastify.get('/users', list)\nfastify.post('/users', create)\nfastify.listen({ port: 3000 })\n");
+    assert_eq!(r, ["GET /users list()", "POST /users create()"]);
+    // Hono: a sub-app routed under a path; the routing call is no route of its own
+    let r = js("import { Hono } from 'hono'\nconst app = new Hono()\nconst users = new Hono()\nusers.get('/:id', show)\nusers.post('/', create)\napp.route('/users', users)\napp.get('/health', list)\nexport default app\n");
+    // (the root of a mounted router keeps its slash, as Express and FastAPI routes do)
+    assert_eq!(r, ["GET /health list()", "GET /users/:id show()", "POST /users/ create()"]);
+    // NestJS-style code outside JavaScript and TypeScript: a mount by `route`, an options object, a bare verb decorator change nothing
+    let d = analyze(&[("main.py", "from flask import Flask\n\napp = Flask(__name__)\nusers = Flask(__name__)\napp.route('/users', users)\n\n@Post()\ndef create():\n    return 1\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(route_heads(&d), ["ANY /users"]);
+}
+
+#[test]
+fn fastify_plugins_take_the_prefix_they_are_registered_with() {
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"server.js\",\"dependencies\":{\"fastify\":\"4\"}}"),
+        ("server.js", "const fastify = require('fastify')()\nconst users = require('./users')\nfastify.register(users, { prefix: '/users' })\nfastify.listen({ port: 3000 })\n"),
+        ("users.js", "async function show(req, reply) {}\nmodule.exports = async function (app, opts) {\n  app.get('/:id', show)\n}\n"),
+    ]);
+    assert_eq!(route_heads(&d), ["GET /users/:id show()"]);
+}
+
+#[test]
+fn nextjs_file_routes() {
+    let d = analyze(&[
+        ("package.json", r#"{"name": "site", "scripts": {"dev": "next dev"}, "dependencies": {"next": "14"}}"#),
+        // pages router: the default export answers every verb, at the path of the file under pages/
+        ("pages/api/users/[id].ts", "import type { NextApiRequest, NextApiResponse } from 'next'\nimport { find } from '../../../lib/db'\n\nexport default async function handler(req: NextApiRequest, res: NextApiResponse) {\n  res.json(find(req.query.id))\n}\n"),
+        ("pages/api/health.js", "export default function (req, res) {\n  res.status(200).json(ping())\n}\n\nfunction ping() {\n  return 1\n}\n"),
+        ("pages/api/index.js", "async function hello(req, res) {\n  res.end('hi')\n}\n\nexport default hello\n"),
+        // app router: one route per function exported under a verb's name; a route group is no part of the path
+        ("app/api/items/[id]/route.ts", "import { find } from '../../../../lib/db'\n\nexport async function GET(req: Request) {\n  return Response.json(find('1'))\n}\n\nexport async function DELETE(req: Request) {\n  return new Response(null)\n}\n\nfunction GETTER() {}\n"),
+        ("app/(shop)/cart/route.js", "export const POST = async (req) => {\n  return new Response()\n}\n\nconst PUT = async () => {}\n"),
+        ("app/blog/[...slug]/route.ts", "export function GET() {\n  return new Response()\n}\n"),
+        // pages are not endpoints
+        ("pages/about.jsx", "export default function About() {\n  return null\n}\n"),
+        ("app/dashboard/page.tsx", "export default function Page() {\n  return null\n}\n"),
+        ("app/layout.tsx", "export function GET() {\n  return null\n}\n"),
+        ("lib/db.ts", "export function find(id: string) {\n  return id\n}\n"),
+    ]);
+    assert_eq!(route_heads(&d), [
+        "ANY /api hello()",
+        "ANY /api/health ping()",
+        "ANY /api/users/{id} handler()",
+        "DELETE /api/items/{id} DELETE()",
+        "GET /api/items/{id} GET()",
+        "GET /blog/{slug} GET()",
+        "POST /cart POST()",
+    ]);
+    // the handler leads on to what it calls
+    let r = procs(&d)[0]["routes"].as_array().unwrap().iter().find(|r| r["path"] == "/api/users/{id}" ).cloned().unwrap();
+    let names: Vec<&str> = r["steps"].as_array().unwrap().iter().map(|s| s["n"].as_str().unwrap()).collect();
+    assert_eq!(names, ["handler()", "find()"]);
+    // the same places in another language are no routes
+    let d = analyze(&[
+        ("main.py", "import app.api.route\n\nif __name__ == \"__main__\":\n    app.api.route.GET()\n"),
+        ("app/api/route.py", "def GET():\n    return 1\n"),
+        ("pages/api/users.py", "def handler():\n    return 1\n"),
+    ]);
+    assert_eq!(route_heads(&d), Vec::<String>::new());
+}
+
+#[test]
+fn nestjs_controllers() {
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"src/main.ts\",\"dependencies\":{\"@nestjs/core\":\"10\"}}"),
+        ("src/main.ts", "import { NestFactory } from '@nestjs/core'\nimport { AppModule } from './app.module'\n\nasync function bootstrap() {\n  const app = await NestFactory.create(AppModule)\n  await app.listen(3000)\n}\nbootstrap()\n"),
+        ("src/app.module.ts", "import { Module } from '@nestjs/common'\nimport { UsersController } from './users.controller'\n\n@Module({ controllers: [UsersController] })\nexport class AppModule {}\n"),
+        ("src/users.controller.ts", "import { Controller, Get, Post } from '@nestjs/common'\n\n@Controller('users')\nexport class UsersController {\n  @Get(':id')\n  findOne() {\n    return {}\n  }\n\n  @Post()\n  create() {\n    return {}\n  }\n}\n"),
+    ]);
+    assert_eq!(route_heads(&d), ["GET /users/:id UsersController.findOne()", "POST /users UsersController.create()"]);
+}
+
+#[test]
+fn javascript_libraries_are_catalogued() {
+    for (lib, label) in [("hono", "Web framework"), ("@koa/router", "Web framework"), ("drizzle-orm/node-postgres", "Database"), ("@mikro-orm/core", "Database")] {
+        let d = analyze(&[("server.js", format!("import x from '{lib}'\nx()\n").as_str())]);
+        let labels: Vec<&str> = d["repo"]["stack"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, [label], "{lib}");
+    }
+}
+
+/// the "db" labels of the steps of a one-file program, each function's in the order they run
+fn js_db(path: &str, src: &str) -> Vec<String> {
+    db_steps(&analyze(&[(path, src)]), "")
+}
+
+#[test]
+fn javascript_orm_prisma() {
+    // the model is the member the call is made through; raw SQL reads or writes the database
+    let got = js_db("main.ts", "import { PrismaClient } from '@prisma/client'\n\nconst prisma = new PrismaClient()\n\nasync function read() {\n  await prisma.user.findMany({ where: { active: true } })\n  await prisma.orderItem.count()\n  await prisma.$queryRaw`SELECT 1`\n}\n\nasync function write() {\n  await prisma.user.create({ data: {} })\n  await prisma.post.deleteMany()\n  await prisma.$executeRaw`DELETE FROM t`\n}\n\nread()\nwrite()\n");
+    assert_eq!(got, ["reads User", "reads OrderItem", "reads database", "writes User", "writes Post", "writes database"]);
+}
+
+#[test]
+fn javascript_orm_typeorm() {
+    // a repository declared as Repository<User> does not say its entity where it is used: database; one made for the entity does
+    let got = js_db("main.ts", "import { Entity, PrimaryGeneratedColumn, Repository, DataSource } from 'typeorm'\n\n@Entity()\nexport class User {\n  @PrimaryGeneratedColumn()\n  id: number\n}\n\nexport const AppDataSource = new DataSource({ type: 'postgres' })\n\nasync function read(repo: Repository<User>) {\n  await repo.find()\n  await AppDataSource.getRepository(User).findOneBy({ id: 1 })\n}\n\nasync function write(repo: Repository<User>) {\n  await repo.save({})\n  await AppDataSource.getRepository(User).softDelete(1)\n}\n\nasync function query(repo: Repository<User>) {\n  return repo.createQueryBuilder('u').where('u.id = :id', { id: 1 }).getMany()\n}\n\nread(null)\nwrite(null)\nquery(null)\n");
+    assert_eq!(got, ["reads database", "reads User", "writes database", "writes User", "reads database"]);
+    // an entity that extends BaseEntity is queried on its class
+    let got = js_db("main.ts", "import { BaseEntity, Entity } from 'typeorm'\n\n@Entity()\nexport class Photo extends BaseEntity {}\n\nasync function run() {\n  await Photo.findBy({ id: 1 })\n  await Photo.insert({})\n}\n\nrun()\n");
+    assert_eq!(got, ["reads Photo", "writes Photo"]);
+}
+
+#[test]
+fn javascript_orm_sequelize() {
+    // a class model and one made by define; an instance found by an awaited query writes its model
+    let got = js_db("server.js", "const { Sequelize, Model, DataTypes } = require('sequelize')\nconst sequelize = new Sequelize('sqlite::memory:')\n\nclass User extends Model {}\nUser.init({ name: DataTypes.STRING }, { sequelize })\nconst Post = sequelize.define('Post', { title: DataTypes.STRING })\n\nasync function read() {\n  await User.findAll()\n  await Post.findByPk(1)\n}\n\nasync function write() {\n  await Post.bulkCreate([])\n  const user = await User.findOne({ where: { id: 1 } })\n  user.name = 'x'\n  await user.save()\n  await User.destroy({ where: { id: 2 } })\n}\n\nread()\nwrite()\n");
+    assert_eq!(got, ["reads User", "reads Post", "writes Post", "reads User", "writes User"]);
+}
+
+#[test]
+fn javascript_orm_mongoose() {
+    let got = js_db("server.cjs", "const mongoose = require('mongoose')\nconst userSchema = new mongoose.Schema({ name: String })\nconst User = mongoose.model('User', userSchema)\nmodule.exports.Post = mongoose.model('Post', new mongoose.Schema({}))\n\nasync function read() {\n  await User.find({ active: true })\n  await User.countDocuments()\n}\n\nasync function write() {\n  const doc = new User({ name: 'x' })\n  await doc.save()\n  await User.findByIdAndUpdate(1, { name: 'y' })\n  await Post.deleteMany({})\n}\n\nread()\nwrite()\n");
+    assert_eq!(got, ["reads User", "writes User", "writes Post"]);
+    // TypeScript: the model function typed with the document's interface
+    let got = js_db("main.ts", "import { Schema, model } from 'mongoose'\n\ninterface IUser { name: string }\nexport const User = model<IUser>('User', new Schema<IUser>({ name: String }))\n\nasync function run() {\n  await User.findById('1')\n  await User.insertMany([])\n}\n\nrun()\n");
+    assert_eq!(got, ["reads User", "writes User"]);
+}
+
+#[test]
+fn javascript_orm_drizzle() {
+    // tables are values, not classes: the steps say database
+    let got = js_db("main.ts", "import { drizzle } from 'drizzle-orm/node-postgres'\nimport { pgTable, serial, text } from 'drizzle-orm/pg-core'\nimport { eq } from 'drizzle-orm'\n\nexport const users = pgTable('users', { id: serial('id'), name: text('name') })\nconst db = drizzle(process.env.DATABASE_URL)\n\nasync function read() {\n  await db.select().from(users).where(eq(users.id, 1))\n  await db.query.users.findMany()\n}\n\nasync function write() {\n  await db.insert(users).values({ name: 'x' })\n  await db.update(users).set({ name: 'y' })\n  await db.delete(users).where(eq(users.id, 1))\n}\n\nread()\nwrite()\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+}
+
+#[test]
+fn javascript_orm_knex() {
+    // the handle is called with the table, then the query is chained; the SQL of raw is not read, so it adds no step
+    let got = js_db("server.mjs", "import knex from 'knex'\n\nconst db = knex({ client: 'pg' })\n\nasync function read() {\n  await db('users').where({ id: 1 }).first()\n  await db.select('id').from('users')\n}\n\nasync function write() {\n  await db('users').insert({ name: 'x' })\n  await db('users').where({ id: 1 }).del()\n}\n\nasync function raw() {\n  await db.raw('select 1')\n}\n\nread()\nwrite()\nraw()\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // the library required and called at once is the handle
+    let got = js_db("server.js", "const knex = require('knex')({ client: 'pg' })\n\nasync function write() {\n  await knex('users').where('id', 1).update({ name: 'x' })\n}\n\nwrite()\n");
+    assert_eq!(got, ["writes database"]);
+}
+
+#[test]
+fn javascript_orm_mikro_orm() {
+    let got = js_db("main.ts", "import { Entity, PrimaryKey, EntityManager } from '@mikro-orm/core'\n\n@Entity()\nexport class Book {\n  @PrimaryKey()\n  id!: number\n}\n\nasync function read(em: EntityManager) {\n  await em.find(Book, {})\n  await em.count(Book)\n}\n\nasync function write(em: EntityManager) {\n  em.persist(new Book())\n  await em.flush()\n  await em.nativeDelete(Book, { id: 1 })\n}\n\nread(null)\nwrite(null)\n");
+    assert_eq!(got, ["reads Book", "writes Book", "writes database"]);
+}
+
+#[test]
+fn javascript_orms_leave_plain_values_alone() {
+    // a file that declares a real handle or model, then calls generic names on other values
+    let preludes = [
+        ("main.ts", "import { PrismaClient } from '@prisma/client'\nconst prisma = new PrismaClient()\n"),
+        ("main.ts", "import { Entity, Repository } from 'typeorm'\n@Entity()\nexport class User {}\nexport let repo: Repository<User>\n"),
+        ("server.js", "const { Model } = require('sequelize')\nclass User extends Model {}\n"),
+        ("server.js", "const mongoose = require('mongoose')\nconst User = mongoose.model('User', new mongoose.Schema({}))\n"),
+        ("main.ts", "import { drizzle } from 'drizzle-orm/node-postgres'\nconst db = drizzle('x')\n"),
+        ("server.js", "import knex from 'knex'\nconst db = knex({})\n"),
+        ("main.ts", "import { Entity, EntityManager } from '@mikro-orm/core'\n@Entity()\nexport class Book {}\nexport let em: EntityManager\n"),
+    ];
+    for (path, prelude) in preludes {
+        let src = format!("{prelude}import axios from 'axios'\n\nfunction run(map, cache, arr, set, res, items, job, list, users, other) {{\n  map.get(k)\n  cache.delete(k)\n  arr.find(x => x.id === 1)\n  set.add(x)\n  axios.get(url)\n  res.json({{}})\n  items.update(x)\n  job.save()\n  list.count()\n  users.findMany()\n  other('users').first()\n}}\n\nrun()\n");
+        assert_eq!(js_db(path, &src), Vec::<String>::new(), "{prelude}");
+    }
+}
+
+#[test]
+fn javascript_orm_reading_stays_in_javascript() {
+    // an awaited query that hands back an instance is read the JavaScript way only: Python is read as before
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"),
+        ("models.py", "from tortoise.models import Model\n\nclass User(Model):\n    pass\n"),
+        ("main.py", "from fastapi import FastAPI\nfrom models import User\n\napp = FastAPI()\n\n@app.get(\"/x\")\nasync def x():\n    user = await User.get(id=1)\n    await user.save()\n"),
+    ]);
+    assert_eq!(db_steps(&d, "/x"), ["reads User"]);
+    // a handle made by `new` is read the JavaScript way only
+    let d = analyze(&[("public/index.php", "<?php\nfunction q() { $pdo = new PDO('sqlite::memory:'); return $pdo->query('SELECT 1'); }\nq();\n")]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+}
+
 #[test]
 fn php_frameworks() {
     // Laravel: a resource controller is five endpoints, each to its method

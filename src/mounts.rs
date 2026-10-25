@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::parse::File;
-use crate::rules::{routes_file, GROUP_CALLS, MOUNT_CALLS, INCLUDE, SCOPE_ARRAY, SCOPE_CALLS, SCOPE_CHAIN, SCOPE_FIRST_ARG};
+use crate::rules::{mount_call, routes_file, GROUP_CALLS, INCLUDE, SCOPE_ARRAY, SCOPE_CALLS, SCOPE_CHAIN, SCOPE_FIRST_ARG};
 use crate::tables::STEM;
 
 /// (file, name of the router object in it); the name `*` stands for every router a file builds
@@ -91,6 +91,18 @@ pub(crate) fn kwarg(a: &str) -> Option<(&str, &str)> {
 fn is_literal(a: &str) -> bool {
     let t = a.trim_start_matches(|c: char| "rRbBuUfF".contains(c));
     t.starts_with(['"', '\'', '`'])
+}
+
+/// The arguments, with an options object opened up into its entries where the language passes options that way:
+/// `{ prefix: '/api' }` -> `prefix: '/api'`
+fn open_options(lang: &str, args: Vec<String>) -> Vec<String> {
+    if !crate::rules::OPTION_OBJECT_LANGS.contains(&lang) {
+        return args;
+    }
+    args.into_iter().flat_map(|a| match a.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
+        Some(inner) => args_of(&format!("({inner})")),
+        None => vec![a],
+    }).collect()
 }
 
 /// Prefix arguments of a mount or router call: (path written first, `prefix=` / `url_prefix=` value, the other positionals)
@@ -213,7 +225,7 @@ fn module_file(files: &[File], dotted: &str) -> Option<usize> {
 
 pub fn build(files: &[File]) -> Mounts {
     static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?m)^[ \t]*(?:(?:export\s+)?(?:const|let|var|val)\s+)?([A-Za-z_]\w*)\s*(?::[^=\n]+)?:?=\s*([A-Za-z_][\w.]*)\(").unwrap()
+        Regex::new(r"(?m)^[ \t]*(?:(?:export\s+)?(?:const|let|var|val)\s+)?([A-Za-z_]\w*)\s*(?::[^=\n]+)?:?=\s*(new\s+)?([A-Za-z_][\w.]*)\(").unwrap()
     });
     let by_path: HashMap<&str, usize> = files.iter().enumerate().map(|(i, f)| (f.path.as_str(), i)).collect();
     let ev = Eval { files, consts: RefCell::new(HashMap::new()) };
@@ -222,10 +234,15 @@ pub fn build(files: &[File]) -> Mounts {
         if f.lang.grammar.is_none() {
             continue;
         }
+        let options = crate::rules::OPTION_OBJECT_LANGS.contains(&f.lang.name);
         // a router built with a prefix of its own, or a sub-router made by a group call
         for c in ASSIGN.captures_iter(&f.bare) {
-            let (name, callee) = (c[1].to_string(), c.get(2).unwrap());
-            let args = args_of(&f.bare[callee.start()..]);
+            // `new Router({ prefix: '/api' })` where options come as an object
+            if c.get(2).is_some() && !options {
+                continue;
+            }
+            let (name, callee) = (c[1].to_string(), c.get(3).unwrap());
+            let args = open_options(f.lang.name, args_of(&f.bare[callee.start()..]));
             let (path, _) = split_prefix(&args);
             let Some(path) = path else { continue };
             let last = callee.as_str().rsplit('.').next().unwrap_or("");
@@ -239,8 +256,8 @@ pub fn build(files: &[File]) -> Mounts {
             }
         }
         // one router mounted on another
-        for c in f.calls.iter().filter(|c| !c.is_ref && MOUNT_CALLS.contains(&c.name.as_str()) && !c.recv.is_empty()) {
-            let args = args_of(&f.bare[c.at..c.end.min(f.bare.len())]);
+        for c in f.calls.iter().filter(|c| !c.is_ref && mount_call(f.lang.name, &c.name) && !c.recv.is_empty()) {
+            let args = open_options(f.lang.name, args_of(&f.bare[c.at..c.end.min(f.bare.len())]));
             let (path, rest) = split_prefix(&args);
             let Some(child) = rest.first().and_then(|a| child_key(f, fi, &by_path, a)) else { continue };
             let Some(parent) = mount_parent(f, c) else { continue };

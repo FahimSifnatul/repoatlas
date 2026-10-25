@@ -922,7 +922,7 @@ pub fn def_io(f: &mut File, carried: &[(String, &'static str)], orm: &crate::orm
             found.push("http_in");
         }
         // an ORM call says more than the library it comes from: "reads User" instead of just "database"
-        let labels = crate::orm::accesses(&code, &sessions, &orm.models);
+        let labels = crate::orm::accesses(&code, f.lang.name, &sessions, &orm.models);
         if !labels.is_empty() {
             found.retain(|k| *k != "db");
             if labels.iter().any(|l| l.starts_with("reads")) {

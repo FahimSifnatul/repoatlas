@@ -151,9 +151,10 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
 
     // ---- files the framework loads by convention, and the commands that start the program
     let (conv_found, mut conv_loose) = conventions(&files);
-    // a routes file no program reaches is read by the framework when the program starts
+    // a routes file (or a file that is a route by where it sits) no program reaches is read by the framework when the program starts
+    let framework_read = |f: &File| crate::rules::routes_file(&f.path).is_some() || crate::rules::file_route(f.lang.name, &f.path).is_some();
     let unreached: Vec<String> = files.iter()
-        .filter(|f| crate::rules::routes_file(&f.path).is_some() && f.layer != Some("tests"))
+        .filter(|f| framework_read(f) && f.layer != Some("tests"))
         .map(|f| f.path.clone())
         .collect();
     conv_loose.extend(unreached);
@@ -343,7 +344,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
         // loaded by the framework of the project it sits in, for each of its programs
         for P in &procs {
             // a routes file is read by a program written in its own language, not by any program next to it
-            let same_language = crate::rules::routes_file(m).is_none() || graph::family(files[ix[&P.starts[0]]].lang) == graph::family(files[ix[m]].lang);
+            let same_language = !framework_read(&files[ix[m]]) || graph::family(files[ix[&P.starts[0]]].lang) == graph::family(files[ix[m]].lang);
             if same_language && home(&P.starts[0]) == home(m) {
                 files[ix[&P.starts[0]]].uses.push(m.clone());
                 conv.insert((P.starts[0].clone(), m.clone()));

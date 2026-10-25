@@ -7,11 +7,21 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::parse::{Def, File, Kind};
-use crate::rules::{Orm, ORMS};
+use crate::rules::{orm_form, orm_speaks, Orm, ORMS, ORM_JS_SYNTAX};
 
 /// the ORMs a file is written for: its language, and it mentions one of their libraries
 fn mine(f: &File) -> Vec<(usize, &'static Orm)> {
-    ORMS.iter().enumerate().filter(|(_, o)| o.lang == f.lang.name && o.libs.iter().any(|l| f.bare.contains(l))).collect()
+    ORMS.iter().enumerate().filter(|(_, o)| orm_speaks(o.lang, f.lang.name) && o.libs.iter().any(|l| f.bare.contains(l))).collect()
+}
+
+/// models made by a call: `const Post = sequelize.define('Post', ..)`, `module.exports = mongoose.model('User', schema)`,
+/// `model<IUser>('User', schema)`:
+/// the variable it is put in, else the name it is given
+fn called_models(f: &File, o: &Orm) -> Vec<String> {
+    let Some(calls) = orm_form(o.name).map(|x| x.model_calls).filter(|c| !c.is_empty()) else { return vec![] };
+    let names = calls.iter().map(|c| regex::escape(c)).collect::<Vec<_>>().join("|");
+    let re = Regex::new(&format!(r#"(?:(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*=\s*)?(?:[\w$]+\.)?\b(?:{names})\s*(?:<[^<>()]*>)?\s*\(\s*['"]([A-Za-z_$][\w$]*)['"]"#)).unwrap();
+    re.captures_iter(&f.bare).map(|c| c.get(1).unwrap_or_else(|| c.get(2).unwrap()).as_str().to_string()).collect()
 }
 
 /// the attribute lines right above a definition and the start of its body: where `#[derive(..)]`, `@Entity`, `gorm.Model` sit
@@ -43,6 +53,9 @@ pub fn models(files: &[File]) -> HashMap<String, usize> {
         let before = out.len();
         for (f, orms) in files.iter().zip(&gated) {
             let mut found: Vec<(String, usize)> = vec![];
+            for (oi, o) in orms {
+                found.extend(called_models(f, o).into_iter().filter(|n| !out.contains_key(n)).map(|n| (n, *oi)));
+            }
             for d in f.defs.iter().filter(|d| matches!(d.kind, Kind::Class | Kind::Type) && !out.contains_key(&d.name)) {
                 let head = if orms.is_empty() { String::new() } else { head_text(f, d) };
                 let from_root = orms.iter().find(|(_, o)| {
@@ -143,9 +156,20 @@ pub fn sessions(f: &File, ix: &Index) -> Vec<(String, usize)> {
 
 /// names a file holds a database session in: `db: Session`, `pool: &PgPool`, `db *gorm.DB`, `Connection $pdo`, `s = Session(..)`
 pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String, usize)> {
-    const NOT_NAMES: &[&str] = &["return", "var", "func", "type", "struct", "chan", "go", "case", "range", "new", "mut", "let", "const", "use"];
+    const NOT_NAMES: &[&str] = &["return", "var", "func", "type", "struct", "chan", "go", "case", "range", "new", "mut", "let", "const", "use",
+        "await", "extends", "implements", "typeof", "import", "export", "from", "default"];
+    let js = ORM_JS_SYNTAX.contains(&f.lang.name);
+    // `const prisma = new PrismaClient()`
+    let new_kw = if js { r"(?:new\s+)?" } else { "" };
     let mut out = vec![];
     for (oi, o) in mine(f) {
+        if js && orm_form(o.name).is_some_and(|x| x.called_handle) {
+            // `const knex = require('knex')({ client: 'pg' })`: the library, called, is the handle
+            for l in o.libs {
+                let re = Regex::new(&format!(r#"([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]{}['"]\s*\)\s*\("#, regex::escape(l))).unwrap();
+                out.extend(re.captures_iter(&f.bare).map(|c| (c[1].to_string(), oi)));
+            }
+        }
         for ty in o.handles {
             let ty = regex::escape(ty);
             let forms = [
@@ -153,7 +177,7 @@ pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String,
                 // `q *db.Queries`: the type may be named through its package
                 format!(r"(\$?\w+)\s+\*?(?:\w+\.)*{ty}\b"),
                 format!(r"\b{ty}\s+(\$\w+)"),
-                format!(r"(\$?\w+)\s*:?=\s*(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
+                format!(r"(\$?\w+)\s*:?=\s*{new_kw}(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
             ];
             // `http: reqwest::Client`: a type named through a crate path is this ORM's only when the crate is
             // or wraps its handle (`r2d2::Pool`); a path inside the project, `crate::db::Pool`, says nothing either way
@@ -190,7 +214,8 @@ pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String,
 }
 
 /// `.objects.filter(a=1).first()` after a receiver: the names called, and the text inside every pair of parentheses
-fn chain(code: &str, mut i: usize) -> (Vec<&str>, String) {
+/// Names may hold `$` where `dollar` (JavaScript: `prisma.$queryRaw`).
+fn chain(code: &str, mut i: usize, dollar: bool) -> (Vec<&str>, String) {
     let b = code.as_bytes();
     let (mut methods, mut args) = (vec![], String::new());
     let skip = |mut j: usize| {
@@ -210,7 +235,7 @@ fn chain(code: &str, mut i: usize) -> (Vec<&str>, String) {
         };
         j = skip(j);
         let s = j;
-        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || dollar && b[j] == b'$') {
             j += 1;
         }
         if j == s {
@@ -263,20 +288,31 @@ fn chain(code: &str, mut i: usize) -> (Vec<&str>, String) {
 }
 
 /// `reads User`, `writes database`: every database call in `code`, in the order the code makes them
-pub fn accesses(code: &str, handles: &[(String, usize)], models: &HashMap<String, usize>) -> Vec<String> {
+pub fn accesses(code: &str, lang: &str, handles: &[(String, usize)], models: &HashMap<String, usize>) -> Vec<String> {
     static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$?[A-Za-z_]\w*").unwrap());
     static ASSIGN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\$?[A-Za-z_]\w*)\s*(?::=|=)\s*(?:new\s+)?(\$?[A-Za-z_]\w*)").unwrap());
+    // `const user = await User.findByPk(1)`
+    static ASSIGN_AWAIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\$?[A-Za-z_]\w*)\s*=\s*(?:await\s+)?(?:new\s+)?(\$?[A-Za-z_]\w*)").unwrap());
     if models.is_empty() && handles.is_empty() {
         return vec![];
     }
+    let js = ORM_JS_SYNTAX.contains(&lang);
+    let assign = if js { &ASSIGN_AWAIT } else { &ASSIGN };
     // variables holding one instance of a model: `user = User.objects.get(..)`, `$u = new User`
-    let instances: HashMap<&str, &str> = ASSIGN.captures_iter(code).filter(|c| models.contains_key(&c[2])).map(|c| (c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str())).collect();
+    let instances: HashMap<&str, &str> = assign.captures_iter(code).filter(|c| models.contains_key(&c[2])).map(|c| (c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str())).collect();
     let mut out: Vec<String> = vec![];
     for m in WORD.find_iter(code) {
         let w = m.as_str();
         let prev = code[..m.start()].chars().next_back();
         let member = matches!(prev, Some('.')) || code[..m.start()].ends_with("->") || code[..m.start()].ends_with("::");
-        let (methods, args) = chain(code, m.end());
+        let handle = handles.iter().find(|(n, _)| n == w.trim_start_matches('$'));
+        let form = handle.and_then(|(_, oi)| orm_form(ORMS[*oi].name));
+        // `db('users').where(..)`: the handle is called first, then the chain
+        let after = match (form.is_some_and(|x| x.called_handle) && !member, code[m.end()..].starts_with('(')) {
+            (true, true) => close_paren(code, m.end()).unwrap_or(m.end()),
+            _ => m.end(),
+        };
+        let (methods, args) = chain(code, after, js);
         if methods.is_empty() {
             continue;
         }
@@ -293,10 +329,16 @@ pub fn accesses(code: &str, handles: &[(String, usize)], models: &HashMap<String
         let label = if let (Some(&oi), false) = (models.get(w), member) {
             let (read, write) = verbs(oi);
             (read || write).then(|| (write, w.to_string()))
-        } else if let Some((_, oi)) = handles.iter().find(|(n, _)| n == w.trim_start_matches('$')) {
+        } else if let Some((_, oi)) = handle {
             let (read, write) = verbs(*oi);
-            let model = WORD.find_iter(&args).map(|x| x.as_str()).find(|x| models.contains_key(*x)).unwrap_or("database");
-            (read || write).then(|| (write, model.to_string()))
+            let o = &ORMS[*oi];
+            // `prisma.orderItem.findMany()`: the member called through is the model, spelt as its class is
+            let member_model = methods.first().filter(|x| {
+                form.is_some_and(|f| f.member_models) && methods.len() > 1 && !o.reads.contains(x) && !o.writes.contains(x)
+                    && x.starts_with(|c: char| c.is_ascii_lowercase())
+            }).map(|x| format!("{}{}", x[..1].to_ascii_uppercase(), &x[1..]));
+            let model = member_model.unwrap_or_else(|| WORD.find_iter(&args).map(|x| x.as_str()).find(|x| models.contains_key(*x)).unwrap_or("database").to_string());
+            (read || write).then_some((write, model))
         } else if let (Some(model), false) = (instances.get(w), member) {
             let (_, write) = verbs(models[*model]);
             write.then(|| (true, model.to_string()))
@@ -319,4 +361,22 @@ pub fn accesses(code: &str, handles: &[(String, usize)], models: &HashMap<String
         }
     }
     out
+}
+
+/// just past the parenthesis that closes the one opening at `open`
+fn close_paren(code: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, b) in code.bytes().enumerate().skip(open) {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }

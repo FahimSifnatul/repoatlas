@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{routes_file, NAMED_ROUTE_ARGS, NAMED_ROUTE_CALLS, ROUTE_TABLES, ROUTE_TABLE_ENTRY, VIEW_ROUTE_NAME, VIEW_VERB, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, BARE_VERB_DECORATOR, BARE_VERB_DECORATOR_LANGS, NAMED_ROUTE_ARGS, NAMED_ROUTE_CALLS, ROUTE_TABLES, ROUTE_TABLE_ENTRY, VIEW_ROUTE_NAME, VIEW_VERB, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -423,6 +423,14 @@ fn decorator_route(head: &str) -> Option<(String, String)> {
     None
 }
 
+/// A verb decorator that names no path, where the language writes one (NestJS `@Post()`): it answers at the class prefix
+fn bare_verb_decorator(lang: &str, head: &str) -> Option<(String, String)> {
+    if !BARE_VERB_DECORATOR_LANGS.contains(&lang) {
+        return None;
+    }
+    BARE_VERB_DECORATOR.captures(head).map(|c| (c[1].to_uppercase(), String::new()))
+}
+
 /// The object a decorator route is registered on: `@router.get("/x")` -> router, `@app.route(..)` -> app
 fn decorator_recv(head: &str) -> String {
     static RECV: LazyLock<Regex> = LazyLock::new(|| rx(r"@(?:[\w$]+\.)*([\w$]+)\.(?i:get|post|put|delete|patch|route|head|options|websocket)\("));
@@ -475,8 +483,63 @@ pub fn parse(f: &mut File) {
     f.entry = f.text.starts_with("#!")
         || (f.lang.name == "Python" && f.path.ends_with("__main__.py"))
         || (!f.lang.entry_re.is_empty() && f.lang.entry_re.iter().all(|p| Regex::new(p).unwrap().is_match(&f.bare)));
+    file_routes(f);
     imports(f);
     symbols(f);
+}
+
+/// A file whose place in the tree is its route (rules::FILE_ROUTES): its default export answers every verb, or each
+/// function it exports under a verb's name answers that verb.
+fn file_routes(f: &mut File) {
+    let Some((rule, path)) = crate::rules::file_route(f.lang.name, &f.path) else { return };
+    let top = |d: &Def| d.kind == Kind::Func && d.parent == Some(0);
+    let route = |verb: &str, at: usize, end: usize, handler: &str| Route {
+        verb: verb.to_string(), path: path.clone(), line: line_of(&f.text, at), at, end, def: 0, recv: String::new(),
+        handler: handler.to_string(), name: String::new(),
+    };
+    let mut found = vec![];
+    if rule.verb_exports {
+        // `export async function GET(req)`, `export const POST = async (req) => ..`
+        for d in f.defs.iter().filter(|d| top(d) && crate::rules::ROUTE_EXPORT_VERBS.contains(&d.name.as_str())) {
+            let line = f.code[..d.start.min(f.code.len())].rfind('\n').map_or(0, |i| i + 1);
+            if f.code[line..d.start.min(f.code.len())].split_whitespace().any(|w| w == "export") {
+                found.push(route(&d.name, d.start, d.end, &d.name));
+            }
+        }
+    } else if let Some(c) = crate::rules::DEFAULT_EXPORT.captures(&f.code) {
+        let whole = c.get(0).unwrap();
+        let name = c.name("func").or(c.name("name")).map_or("", |m| m.as_str());
+        match f.defs.iter().find(|d| top(d) && !name.is_empty() && d.name == name) {
+            // a function of the file, named: it is the handler
+            Some(d) => found.push(route("ANY", d.start, d.end, name)),
+            // written in place without a name: the calls inside it
+            None if c.name("func").is_some() => {
+                let end = body_end(&f.code, whole.end()).unwrap_or(f.code.len());
+                found.push(route("ANY", whole.start(), end, ""));
+            }
+            None => {}
+        }
+    }
+    f.routes.extend(found);
+}
+
+/// where the `{..}` body that follows `from` ends
+fn body_end(code: &str, from: usize) -> Option<usize> {
+    let open = from + code.get(from..)?.find('{')?;
+    let mut depth = 0;
+    for (i, b) in code.bytes().enumerate().skip(open) {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
@@ -516,7 +579,12 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 }
                 let head = head_of(node);
                 let body = node.child_by_field_name("body").map(|b| b.start_byte()).unwrap_or(node.end_byte());
-                let route = if kind == Kind::Func { decorator_route(&src[head..name.start_byte()]) } else { None };
+                let route = if kind == Kind::Func {
+                    let above = &src[head..name.start_byte()];
+                    decorator_route(above).or_else(|| bare_verb_decorator(f.lang.name, above))
+                } else {
+                    None
+                };
                 defs.push(Def {
                     name: clean_name(&src[name.byte_range()]),
                     kind,
@@ -709,7 +777,10 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,
                     _ => verb,
                 };
-                if INCLUDE.is_match(&handler) || sets_path {
+                // Hono `app.route('/users', users)`: a router handed over under a path is a mount (mounts.rs), not an endpoint
+                static ROUTER_NAME: LazyLock<Regex> = LazyLock::new(|| rx(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$"));
+                let mounts_router = crate::rules::lang_mount_call(f.lang.name, &name) && args.len() == 2 && ROUTER_NAME.is_match(&args[1]);
+                if INCLUDE.is_match(&handler) || sets_path || mounts_router {
                     // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
                 } else {
                     let recv = if on_chain.is_some() { chain_root() } else { recv.rsplit('.').next().unwrap_or("").to_string() };

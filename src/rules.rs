@@ -15,6 +15,23 @@ pub const IMPORT_ONLY_NAMES: &[&str] = &["ninja"];
 
 /// calls that put one router under another
 pub const MOUNT_CALLS: &[&str] = &["include_router", "register_blueprint", "use", "mount", "Mount", "add_router"];
+
+/// the language names of JavaScript and TypeScript files (.js .jsx .mjs .cjs, .ts .tsx)
+const JS_TS: &[&str] = &["JavaScript", "TypeScript"];
+/// calls that put one router under another in files of these languages only: Fastify `fastify.register(users, { prefix: '/users' })`,
+/// Hono `app.route('/users', users)` (a `route` call given a path and a router is a mount, not an endpoint)
+pub const LANG_MOUNT_CALLS: &[(&[&str], &[&str])] = &[(JS_TS, &["register", "route"])];
+/// languages whose routers take their options as one object: Koa `new Router({ prefix: '/api' })`, Fastify `{ prefix: '/users' }`
+pub const OPTION_OBJECT_LANGS: &[&str] = JS_TS;
+
+/// whether a call of that name, in a file of that language, puts one router under another
+pub fn mount_call(lang: &str, name: &str) -> bool {
+    MOUNT_CALLS.contains(&name) || lang_mount_call(lang, name)
+}
+/// whether a call of that name mounts a router in that language only (`route` elsewhere registers an endpoint)
+pub fn lang_mount_call(lang: &str, name: &str) -> bool {
+    LANG_MOUNT_CALLS.iter().any(|(ls, cs)| ls.contains(&lang) && cs.contains(&name))
+}
 /// calls that make a sub-router with a prefix: `v1 := r.Group("/v1")`
 pub const GROUP_CALLS: &[&str] = &["Group", "group", "Party"];
 
@@ -97,6 +114,10 @@ pub fn method_verb(lang: &str, name: &str) -> Option<&'static str> {
     METHOD_VERBS.iter().filter(|(l, _)| *l == lang).flat_map(|(_, ms)| ms.iter()).find(|(m, _)| *m == name).map(|(_, v)| *v)
 }
 
+/// languages where a verb decorator may name no path, and then answers at its class prefix: NestJS `@Post()`
+pub const BARE_VERB_DECORATOR_LANGS: &[&str] = JS_TS;
+pub static BARE_VERB_DECORATOR: LazyLock<Regex> = LazyLock::new(|| rx(r"@(Get|Post|Put|Delete|Patch)\(\s*\)"));
+
 /// calls whose argument is a list of (path, handler) pairs, by language: Tornado `Application([(r"/x", Handler)])`
 pub const ROUTE_TABLES: &[(&str, &str)] = &[("Python", "Application")];
 /// one (path, handler) pair of a route table
@@ -156,6 +177,58 @@ pub const ROUTE_FILES: &[(&str, &str, &[&str])] = &[
     ("", "urls.py", &["path", "re_path", "url"]),
     ("routes/", ".php", &[]),
 ];
+
+/// Files whose place in the tree is the route they answer (Next.js `pages/api/users/[id].ts`, `app/api/users/[id]/route.ts`).
+pub struct FileRoute {
+    /// the languages it holds for (lang::Lang.name)
+    pub langs: &'static [&'static str],
+    /// the folder the route is read below (anywhere in the repo: `src/app/`, `web/pages/`)
+    pub root: &'static str,
+    /// what the path below that folder must start with to answer (`api/`: the other pages are pages, not endpoints)
+    pub under: &'static str,
+    /// the file name (without extension) that answers for its folder; none: every file answers, `index` for its folder
+    pub stem: Option<&'static str>,
+    /// the handlers are the functions exported under a verb's name (`export async function GET`), one route each;
+    /// otherwise the default export answers every verb
+    pub verb_exports: bool,
+}
+
+pub static FILE_ROUTES: &[FileRoute] = &[
+    FileRoute { langs: JS_TS, root: "pages/", under: "api/", stem: None, verb_exports: false },
+    FileRoute { langs: JS_TS, root: "app/", under: "", stem: Some("route"), verb_exports: true },
+];
+/// the names a file route exports its verb handlers under
+pub const ROUTE_EXPORT_VERBS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+/// a folder that is no part of the path: a route group `(marketing)`
+pub static ROUTE_GROUP_DIR: LazyLock<Regex> = LazyLock::new(|| rx(r"^\(.*\)$"));
+/// a folder or file that stands for a parameter: `[id]`, `[...slug]`, `[[...slug]]` -> `{id}`, `{slug}`
+pub static ROUTE_PARAM_DIR: LazyLock<Regex> = LazyLock::new(|| rx(r"^\[\[?(?:\.\.\.)?(\w+)\]\]?$"));
+/// the default export, by name or written in place: `export default handler`, `export default async function handler(`
+pub static DEFAULT_EXPORT: LazyLock<Regex> = LazyLock::new(|| {
+    rx(r"(?m)\bexport\s+default\s+(?:(?:async\s+)?function\b\s*\*?\s*(?P<func>[\w$]*)\s*\(|(?P<name>[A-Za-z_$][\w$]*)\s*;?\s*$)")
+});
+
+/// The route a file answers by where it sits: (its file route, the path) when it is one
+pub fn file_route(lang: &str, path: &str) -> Option<(&'static FileRoute, String)> {
+    FILE_ROUTES.iter().filter(|r| r.langs.contains(&lang)).find_map(|r| {
+        let at = if path.starts_with(r.root) { 0 } else { path.find(&format!("/{}", r.root))? + 1 };
+        let rel = &path[at + r.root.len()..];
+        if !rel.starts_with(r.under) {
+            return None;
+        }
+        let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let stem = file.split('.').next().unwrap_or(file);
+        let mut segs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+        match r.stem {
+            Some(s) if s != stem => return None,
+            Some(_) => {}
+            None if stem == "index" => {}
+            None => segs.push(stem),
+        }
+        let segs: Vec<String> = segs.into_iter().filter(|s| !ROUTE_GROUP_DIR.is_match(s)).map(|s| ROUTE_PARAM_DIR.replace(s, "{$1}").into_owned()).collect();
+        Some((r, format!("/{}", segs.join("/"))))
+    })
+}
 
 /// the calls that register a route in this file, if it is a routes file
 pub fn routes_file(path: &str) -> Option<&'static [&'static str]> {
@@ -305,4 +378,69 @@ pub static ORMS: &[Orm] = &[
           reads: &["find", "findAll", "findBy", "findOneBy", "createQueryBuilder", "getResult", "getOneOrNullResult", "getSingleResult", "createQuery"],
           writes: &["persist", "remove", "flush", "merge"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
     Orm { name: "PDO", lang: "PHP", libs: &["PDO"], model_bases: &[], model_attrs: &[], handles: &["PDO"], reads: &["query", "prepare"], writes: &["exec"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    // JavaScript, and TypeScript too (ORM_LANGS_ALSO)
+    // the model is the member the call is made through: `prisma.user.findMany()` reads User (ORM_FORMS)
+    Orm { name: "Prisma", lang: "JavaScript", libs: &["@prisma/client"], model_bases: &[], model_attrs: &[], handles: &["PrismaClient"],
+          reads: &["findMany", "findUnique", "findUniqueOrThrow", "findFirst", "findFirstOrThrow", "count", "aggregate", "groupBy", "$queryRaw", "$queryRawUnsafe"],
+          writes: &["create", "createMany", "update", "updateMany", "upsert", "delete", "deleteMany", "$executeRaw", "$executeRawUnsafe"],
+          read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    // a repository names its entity where it is made (`getRepository(User)`), not where it is declared (`Repository<User>`)
+    Orm { name: "TypeORM", lang: "JavaScript", libs: &["typeorm"], model_bases: &["BaseEntity"], model_attrs: &["@Entity"],
+          handles: &["Repository", "EntityManager", "DataSource", "getRepository"],
+          reads: &["find", "findOne", "findBy", "findOneBy", "count", "exists", "getMany", "getOne", "getCount"],
+          writes: &["save", "insert", "update", "delete", "remove", "softDelete"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    // models are classes or made by a call (ORM_FORMS): `const Post = sequelize.define('Post', {..})`
+    Orm { name: "Sequelize", lang: "JavaScript", libs: &["sequelize"], model_bases: &["Model"], model_attrs: &[], handles: &[],
+          reads: &["findAll", "findOne", "findByPk", "count"], writes: &["create", "bulkCreate", "update", "destroy", "upsert", "save"],
+          read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    Orm { name: "Mongoose", lang: "JavaScript", libs: &["mongoose"], model_bases: &[], model_attrs: &[], handles: &[],
+          reads: &["find", "findOne", "findById", "countDocuments", "aggregate"],
+          writes: &["create", "insertMany", "updateOne", "updateMany", "findByIdAndUpdate", "findOneAndUpdate", "deleteOne", "deleteMany",
+                    "findByIdAndDelete", "save"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    // tables are values (`pgTable('users', ..)`), not classes: the steps say database
+    Orm { name: "Drizzle", lang: "JavaScript", libs: &["drizzle-orm"], model_bases: &[], model_attrs: &[], handles: &["drizzle"],
+          reads: &["select", "findMany", "findFirst"], writes: &["insert", "update", "delete"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    // the handle is called with the table first (ORM_FORMS): `db('users').where(..).first()`; the SQL of `raw` is not read
+    Orm { name: "Knex", lang: "JavaScript", libs: &["knex"], model_bases: &[], model_attrs: &[], handles: &["knex"],
+          reads: &["select", "where", "first", "pluck"], writes: &["insert", "update", "del", "delete"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    Orm { name: "MikroORM", lang: "JavaScript", libs: &["@mikro-orm"], model_bases: &[], model_attrs: &["@Entity"], handles: &["EntityManager"],
+          reads: &["find", "findOne", "count"], writes: &["persist", "persistAndFlush", "remove", "flush", "nativeInsert", "nativeUpdate", "nativeDelete"],
+          read_prefixes: &[], write_prefixes: &[], pools: &[] },
 ];
+
+/// an ORM written for the first language is used from files of the second too
+pub const ORM_LANGS_ALSO: &[(&str, &str)] = &[("JavaScript", "TypeScript")];
+
+/// whether an ORM written for `orm` is used from files of language `file`
+pub fn orm_speaks(orm: &str, file: &str) -> bool {
+    orm == file || ORM_LANGS_ALSO.iter().any(|(o, f)| *o == orm && *f == file)
+}
+
+/// languages whose ORM code is written the JavaScript way: a handle made by `new` (`prisma = new PrismaClient()`),
+/// an awaited model call that hands back an instance (`user = await User.findByPk(1)`), members named with `$` (`prisma.$queryRaw`)
+pub const ORM_JS_SYNTAX: &[&str] = JS_TS;
+
+/// How some ORMs are written beyond what Orm says
+pub struct OrmForm {
+    /// Orm.name
+    pub orm: &'static str,
+    /// calls that make a model, named by the variable it is put in or else by its first argument:
+    /// `const Post = sequelize.define('Post', ..)`, `module.exports = mongoose.model('User', schema)`
+    pub model_calls: &'static [&'static str],
+    /// the member a call is made through on the handle is the model, spelt with a capital: `prisma.orderItem.count()` reads OrderItem
+    pub member_models: bool,
+    /// the handle is called before the chain: `db('users').where(..).first()`
+    pub called_handle: bool,
+}
+
+pub static ORM_FORMS: &[OrmForm] = &[
+    OrmForm { orm: "Prisma", model_calls: &[], member_models: true, called_handle: false },
+    OrmForm { orm: "Sequelize", model_calls: &["define"], member_models: false, called_handle: false },
+    OrmForm { orm: "Mongoose", model_calls: &["model"], member_models: false, called_handle: false },
+    OrmForm { orm: "Knex", model_calls: &[], member_models: false, called_handle: true },
+];
+
+/// how the ORM of that name is written beyond Orm, if it says more
+pub fn orm_form(orm: &str) -> Option<&'static OrmForm> {
+    ORM_FORMS.iter().find(|f| f.orm == orm)
+}

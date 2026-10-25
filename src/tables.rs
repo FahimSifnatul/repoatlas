@@ -82,7 +82,7 @@ pub const EXT_CATS: &[(&str, &str, &str)] = &[
         github.com/labstack/echo github.com/gofiber/fiber net/http org.springframework.web \
         github.com/beego/beego github.com/astaxie/beego github.com/kataras/iris github.com/cloudwego/hertz \
         org.springframework.boot actix_web axum rocket warp djangorestframework rest_framework litestar poem \
-        falcon pyramid quart ninja django-ninja salvo tide loco-rs loco_rs"),
+        falcon pyramid quart ninja django-ninja salvo tide loco-rs loco_rs hono @koa/router"),
     ("db", "Database", "sqlalchemy sqlmodel alembic psycopg2 psycopg asyncpg pymysql pymongo motor peewee tortoise sqlite3 mongoose \
         mongodb sequelize typeorm prisma @prisma/client knex pg mysql mysql2 better-sqlite3 redis ioredis \
         gorm.io/gorm github.com/jmoiron/sqlx database/sql github.com/redis/go-redis github.com/lib/pq \
@@ -90,7 +90,7 @@ pub const EXT_CATS: &[(&str, &str, &str)] = &[
         diesel sqlx rusqlite elasticsearch cassandra peewee tortoise tortoise-orm pony github.com/uptrace/bun entgo.io/ent \
         sea_orm sea-orm doctrine/orm doctrine/dbal illuminate/database \
         github.com/sqlc-dev/sqlc xorm.io/xorm github.com/go-xorm/xorm github.com/beego/beego/v2/client/orm \
-        github.com/astaxie/beego/orm mongoengine beanie odmantic piccolo ormar tokio-postgres tokio_postgres rbatis"),
+        github.com/astaxie/beego/orm mongoengine beanie odmantic piccolo ormar tokio-postgres tokio_postgres rbatis drizzle-orm @mikro-orm"),
     ("ui", "UI framework", "react react-dom vue svelte @angular/core preact solid-js lit tkinter pyqt5 pyqt6 \
         pyside2 pyside6 streamlit gradio kivy jquery @mui/material antd"),
     ("queue", "Messaging & jobs", "celery rq dramatiq kafka confluent_kafka kafkajs amqplib pika bull bullmq nats"),
