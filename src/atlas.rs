@@ -19,7 +19,7 @@ use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
 use crate::parse::{self, File, Kind};
 use crate::resolve::{basename, dirname, Project};
-use crate::rules::{verb_method, CLASS_HANDLER_LANGS};
+use crate::rules::{method_verb, verb_method, CLASS_HANDLER_LANGS};
 use crate::tables::{cat_of, short as layer_short, toks, ENTRY_STEMS, EXT_CATS, IO, LAYERS, TOKEN_LAYER, WRAPPERS};
 use crate::text::read_para;
 
@@ -831,7 +831,9 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                                 hs = classes;
                             }
                         }
-                        hs = hs.into_iter().flat_map(|g| {
+                        // each verb method is the route of the verb its name says (`on_get` -> GET); the rest stay under ANY
+                        let mut by_verb: Vec<(String, Vec<Gid>)> = vec![];
+                        for g in std::mem::take(&mut hs) {
                             let c = &files[g.0].defs[g.1];
                             let methods: Vec<Gid> = if c.kind == Kind::Class {
                                 files[g.0].defs.iter().enumerate()
@@ -840,8 +842,28 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                             } else {
                                 vec![]
                             };
-                            if methods.is_empty() { vec![g] } else { methods }
-                        }).collect();
+                            if methods.is_empty() {
+                                hs.push(g);
+                            }
+                            for m in methods {
+                                match method_verb(files[m.0].lang.name, &files[m.0].defs[m.1].name) {
+                                    Some(v) => match by_verb.iter_mut().find(|(x, _)| x == v) {
+                                        Some((_, ms)) => ms.push(m),
+                                        None => by_verb.push((v.to_string(), vec![m])),
+                                    },
+                                    None => hs.push(m),
+                                }
+                            }
+                        }
+                        let path = full(&r.recv, r.at, "", &r.path);
+                        let split = !by_verb.is_empty();
+                        for (v, ms) in by_verb {
+                            found.push((v, path.clone(), r.line, ms, pre.clone(), guess));
+                        }
+                        if !split || !hs.is_empty() {
+                            found.push((verb, path, r.line, hs, pre, guess));
+                        }
+                        continue;
                     }
                     found.push((verb, full(&r.recv, r.at, "", &r.path), r.line, hs, pre, guess));
                 }

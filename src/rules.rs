@@ -82,6 +82,16 @@ pub const VERB_METHODS: &[(&str, &[&str])] = &[
 /// languages where a class (or a new object of it) handed to a route that names no verb answers with its verb methods:
 /// Falcon `app.add_route("/x", UserResource())`, Tornado `(r"/x", UserHandler)`
 pub const CLASS_HANDLER_LANGS: &[&str] = &["Python"];
+/// the verb a class handler's method answers, by language: Falcon `on_get`, Tornado and Starlette `get`
+pub const METHOD_VERBS: &[(&str, &[(&str, &str)])] = &[
+    ("Python", &[("on_get", "GET"), ("on_post", "POST"), ("on_put", "PUT"), ("on_patch", "PATCH"), ("on_delete", "DELETE"),
+                 ("get", "GET"), ("post", "POST"), ("put", "PUT"), ("patch", "PATCH"), ("delete", "DELETE")]),
+];
+
+/// the verb a method of that name answers when its class is a route's handler
+pub fn method_verb(lang: &str, name: &str) -> Option<&'static str> {
+    METHOD_VERBS.iter().filter(|(l, _)| *l == lang).flat_map(|(_, ms)| ms.iter()).find(|(m, _)| *m == name).map(|(_, v)| *v)
+}
 
 /// calls whose argument is a list of (path, handler) pairs, by language: Tornado `Application([(r"/x", Handler)])`
 pub const ROUTE_TABLES: &[(&str, &str)] = &[("Python", "Application")];

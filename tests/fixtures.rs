@@ -1263,7 +1263,7 @@ fn py_routes(src: &str) -> Value {
 fn python_falcon_routes() {
     // Falcon: a resource object on a path answers with its on_<verb> methods
     let d = py_routes("import falcon\n\nclass UserResource:\n    def on_get(self, req, resp):\n        resp.media = []\n\n    def on_post(self, req, resp):\n        resp.status = 201\n\n    def helper(self):\n        return 1\n\napp = falcon.App()\napp.add_route(\"/users\", UserResource())\n\nif __name__ == \"__main__\":\n    app.run()\n");
-    assert_eq!(route_lines(&d), ["ANY /users UserResource.on_get(), UserResource.on_post()"]);
+    assert_eq!(route_lines(&d), ["GET /users UserResource.on_get()", "POST /users UserResource.on_post()"]);
 }
 
 #[test]
@@ -1278,7 +1278,7 @@ fn python_pyramid_routes() {
 fn python_tornado_routes() {
     // Tornado: (path, handler class) pairs in the application's list; the handler answers with its verb methods
     let d = py_routes("import tornado.ioloop\nimport tornado.web\n\nclass MainHandler(tornado.web.RequestHandler):\n    def get(self):\n        self.write(\"hi\")\n\nclass UserHandler(tornado.web.RequestHandler):\n    def get(self, id):\n        self.write(id)\n\n    def post(self, id):\n        self.write(id)\n\ndef make_app():\n    return tornado.web.Application([\n        (r\"/\", MainHandler),\n        (r\"/users/(?P<id>[0-9]+)\", UserHandler),\n    ])\n\nif __name__ == \"__main__\":\n    app = make_app()\n    app.listen(8888)\n    tornado.ioloop.IOLoop.current().start()\n");
-    assert_eq!(route_lines(&d), ["ANY / MainHandler.get()", "ANY /users/{id} UserHandler.get(), UserHandler.post()"]);
+    assert_eq!(route_lines(&d), ["GET / MainHandler.get()", "GET /users/{id} UserHandler.get()", "POST /users/{id} UserHandler.post()"]);
 }
 
 #[test]
@@ -1316,6 +1316,9 @@ fn python_route_data_does_not_reach_other_languages() {
     // Python: a route whose handler names a verb keeps its handler; a class only spreads into its methods when the verb is open
     let d = analyze(&[("main.py", "from flask import Flask\n\napp = Flask(__name__)\n\nclass Ctl:\n    def get(self):\n        return 1\n\n@app.get(\"/c\")\ndef c():\n    return Ctl()\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
     assert_eq!(route_lines(&d), ["GET /c c()"]);
+    // Starlette: an endpoint class in a Route answers with its verb methods, each under its own verb; a method that names no verb stays under ANY
+    let d = analyze(&[("main.py", "from starlette.applications import Starlette\nfrom starlette.endpoints import HTTPEndpoint\nfrom starlette.routing import Route\n\nclass UserEndpoint(HTTPEndpoint):\n    async def get(self, request):\n        return 1\n\n    async def post(self, request):\n        return 2\n\n    async def list(self, request):\n        return 3\n\napp = Starlette(routes=[Route(\"/users\", UserEndpoint)])\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(route_lines(&d), ["ANY /users UserEndpoint.list()", "GET /users UserEndpoint.get()", "POST /users UserEndpoint.post()"]);
     // a list of pairs handed to a call that is not an application is not a route table
     let d = analyze(&[("main.py", "import tornado.web\n\ndef run(x):\n    return dict([(\"/a\", x)])\n\nif __name__ == \"__main__\":\n    run(1)\n")]);
     assert_eq!(procs(&d)[0]["routes"].as_array().map_or(0, |r| r.len()), 0);
