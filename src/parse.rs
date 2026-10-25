@@ -101,41 +101,66 @@ pub fn handler_of(expr: &str) -> Option<(String, String)> {
 
 /// The path a chain of router calls sets for the call made on it: `app.at("/x")` -> "/x", `Router::with_path("x").get(a)` -> "x".
 /// Walks back over routes registered on the chain and routers nested in it; any other call ends it (none).
+/// Path calls right before the first one found add to it: `app.at("/users").at("/:id")` -> "/users/:id".
 pub fn chain_path(lang: &str, recv: &str) -> Option<String> {
-    static ONE_STRING: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*"([^"]*)"\s*$"#));
     let ch = crate::rules::chain_of(lang)?;
     let mut s = recv.trim_end();
+    let mut parts: Vec<String> = vec![];
+    // the path calls found so far, innermost last; the walk ends where the next call out is not one
+    let joined = |parts: &[String]| {
+        let mut rev: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+        rev.reverse();
+        crate::mounts::join_path(&rev)
+    };
     loop {
-        let body = s.strip_suffix(')')?;
-        // the parenthesis that opens the last call
-        let b = body.as_bytes();
-        let (mut depth, mut i, mut quoted) = (0i32, b.len(), false);
-        let open = loop {
-            if i == 0 {
-                return None;
-            }
-            i -= 1;
-            match b[i] {
-                b'"' => quoted = !quoted,
-                b')' if !quoted => depth += 1,
-                b'(' if !quoted && depth == 0 => break i,
-                b'(' if !quoted => depth -= 1,
-                _ => {}
-            }
-        };
-        let head = body[..open].trim_end();
-        let rest = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
-        let name = &head[rest.len()..];
-        let rest = rest.trim_end();
-        let rest = rest.strip_suffix('.').or_else(|| rest.strip_suffix("::"))?;
-        if ch.paths.contains(&name) {
-            return ONE_STRING.captures(&body[open + 1..]).map(|c| c[1].to_string());
+        match last_chain_call(s) {
+            Some((name, arg, rest)) if ch.paths.contains(&name) => match one_string(arg) {
+                Some(p) => {
+                    parts.push(p);
+                    s = rest;
+                }
+                None if parts.is_empty() => return None,
+                None => return Some(joined(&parts)),
+            },
+            _ if !parts.is_empty() => return Some(joined(&parts)),
+            Some((name, _, rest)) if ch.verbs.contains(&name) || ch.routes.contains(&name) || ch.nests.contains(&name) => s = rest,
+            _ => return None,
         }
-        if !(ch.verbs.contains(&name) || ch.routes.contains(&name) || ch.nests.contains(&name)) {
+    }
+}
+
+/// the text of a lone string argument: `"/x"` -> "/x"
+fn one_string(arg: &str) -> Option<String> {
+    static ONE_STRING: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*"([^"]*)"\s*$"#));
+    ONE_STRING.captures(arg).map(|c| c[1].to_string())
+}
+
+/// the last call of a chain written `<rest>.name(arg)` or `<rest>::name(arg)`: (name, arg, rest)
+fn last_chain_call(s: &str) -> Option<(&str, &str, &str)> {
+    let s = s.trim_end();
+    let body = s.strip_suffix(')')?;
+    // the parenthesis that opens the last call
+    let b = body.as_bytes();
+    let (mut depth, mut i, mut quoted) = (0i32, b.len(), false);
+    let open = loop {
+        if i == 0 {
             return None;
         }
-        s = rest.trim_end();
-    }
+        i -= 1;
+        match b[i] {
+            b'"' => quoted = !quoted,
+            b')' if !quoted => depth += 1,
+            b'(' if !quoted && depth == 0 => break i,
+            b'(' if !quoted => depth -= 1,
+            _ => {}
+        }
+    };
+    let head = body[..open].trim_end();
+    let rest = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    let name = &head[rest.len()..];
+    let rest = rest.trim_end();
+    let rest = rest.strip_suffix('.').or_else(|| rest.strip_suffix("::"))?;
+    Some((name, &body[open + 1..], rest.trim_end()))
 }
 
 /// a route's own path under the path of the chain it is registered on
@@ -664,11 +689,11 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     None => path,
                 };
                 let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
-                // `app.at("/x").get(h)`: the call only sets the path of the routes chained after it
+                // `app.at("/x").get(h)`, `app.at("/x").at("/y")`: the call only sets the path of what is chained after it
                 let sets_path = chain.is_some_and(|ch| {
                     static NEXT: LazyLock<Regex> = LazyLock::new(|| rx(r"^\s*\.\s*(\w+)\s*\("));
-                    ch.paths.contains(&name.as_str()) && args.len() == 1
-                        && NEXT.captures(&src[node.end_byte()..]).is_some_and(|n| ch.verbs.contains(&&n[1]) || ch.routes.contains(&&n[1]) || ch.nests.contains(&&n[1]))
+                    let continues = |n: &str| ch.verbs.contains(&n) || ch.routes.contains(&n) || ch.nests.contains(&n) || ch.paths.contains(&n);
+                    ch.paths.contains(&name.as_str()) && args.len() == 1 && NEXT.captures(&src[node.end_byte()..]).is_some_and(|n| continues(&n[1]))
                 });
                 // the last argument that is not a keyword other than the one that names the handler
                 let handler = args.iter().skip(1).rev().find_map(|a| match crate::mounts::kwarg(a) {

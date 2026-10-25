@@ -149,15 +149,21 @@ pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String,
         for ty in o.handles {
             let ty = regex::escape(ty);
             let forms = [
-                format!(r"(\$?\w+)\s*:\s*(?:&\s*(?:mut\s+)?|\*)?(?:\w+(?:\.|::))*{ty}\b"),
+                format!(r"(\$?\w+)\s*:\s*(?:&\s*(?:mut\s+)?|\*)?(?P<q>(?:\w+(?:\.|::))*){ty}\b"),
                 // `q *db.Queries`: the type may be named through its package
                 format!(r"(\$?\w+)\s+\*?(?:\w+\.)*{ty}\b"),
                 format!(r"\b{ty}\s+(\$\w+)"),
-                format!(r"(\$?\w+)\s*:?=\s*(?:\w+(?:\.|::))*{ty}\s*[(\[{{]"),
+                format!(r"(\$?\w+)\s*:?=\s*(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
             ];
+            // `http: reqwest::Client`: a type named through a crate path is this ORM's only when the crate is
+            // (a path inside the project, `crate::db::Pool`, says nothing either way)
+            let own_crate = |q: &str| {
+                let Some((first, _)) = q.split_once("::") else { return true };
+                ["crate", "self", "super"].contains(&first) || o.libs.iter().any(|l| l.replace('-', "_") == first.replace('-', "_"))
+            };
             for re in forms {
                 for c in Regex::new(&re).unwrap().captures_iter(&f.code) {
-                    if !NOT_NAMES.contains(&&c[1]) {
+                    if !NOT_NAMES.contains(&&c[1]) && c.name("q").is_none_or(|q| own_crate(q.as_str())) {
                         out.push((c[1].trim_start_matches('$').to_string(), oi));
                     }
                 }

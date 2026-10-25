@@ -1702,6 +1702,28 @@ fn more_rust_frameworks() {
 }
 
 #[test]
+fn nested_tide_paths_join() {
+    let d = analyze(&[("src/main.rs", "use tide::Request;\n\nfn main() {\n    let mut app = tide::new();\n    app.at(\"/users\").at(\"/:id\").get(show);\n    app.at(\"/api\").at(\"/v1\").at(\"/items\").get(list).post(create);\n    app.listen(\"127.0.0.1:8080\");\n}\n\nfn list() {}\n\nfn show() {}\n\nfn create() {}\n")]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/v1/items", "GET /users/:id", "POST /api/v1/items"]);
+    assert_eq!(route_first(&d, "/users/:id").as_deref(), Some("show()"));
+}
+
+#[test]
+fn a_crate_qualified_handle_type_belongs_to_its_crate() {
+    let steps = |src: &str| db_steps(&analyze(&[("src/main.rs", src)]), "");
+    // another crate's Client or Connection is no database session, even in a file written for one
+    let got = steps("use tokio_postgres::Client;\n\nfn main() { run(todo!()); }\n\nasync fn run(http: &reqwest::Client) {\n    http.get(url).query(&[(\"a\", 1)]).send().await;\n    http.execute(req).await;\n}\n");
+    assert_eq!(got, Vec::<String>::new());
+    let got = steps("use rusqlite::params;\n\nfn main() { run(todo!()); }\n\nfn run(conn: &redis::Connection) {\n    conn.execute(\"x\");\n    conn.query_row(\"y\");\n}\n");
+    assert_eq!(got, Vec::<String>::new());
+    // its own crate's, named through the path or imported bare, still is
+    let got = steps("use tokio_postgres::NoTls;\n\nfn main() { run(todo!()); }\n\nasync fn run(client: &tokio_postgres::Client) {\n    client.query_one(\"SELECT 1\", &[]).await;\n}\n");
+    assert_eq!(got, ["reads database"]);
+    let got = steps("use tokio_postgres::Client;\n\nfn main() { run(todo!()); }\n\nasync fn run(client: &Client) {\n    client.execute(\"DELETE FROM t\", &[]).await;\n}\n");
+    assert_eq!(got, ["writes database"]);
+}
+
+#[test]
 fn rust_chain_routes_stay_in_rust() {
     // the same chains in JavaScript and Python are not routes: the chain reading is Rust's
     let d = analyze(&[("server.js", "const express = require('express')\nconst app = express()\napp.at('/users').get(show)\nRoutes.prefix('api').add('/x', get(show))\napp.listen(3000)\nfunction show() {}\n")]);
@@ -1714,6 +1736,7 @@ fn rust_chain_routes_stay_in_rust() {
 fn more_rust_orms() {
     let steps = |src: &str| db_steps(&analyze(&[("src/main.rs", src)]), "");
     // rusqlite: query_row and prepare read, execute and execute_batch write
+    // (`stmt.query_map(..)` alone is not read: the statement is not a declared handle, the `prepare` on the connection is)
     let got = steps("use rusqlite::{params, Connection};\n\nfn main() { read(todo!()); write(todo!()); }\n\nfn read(conn: &Connection) {\n    conn.query_row(\"SELECT 1\", [], |r| r.get(0));\n    let mut stmt = conn.prepare(\"SELECT id FROM t\").unwrap();\n}\n\nfn write(conn: &Connection) {\n    conn.execute(\"DELETE FROM t\", params![]);\n    conn.execute_batch(\"VACUUM\");\n}\n");
     assert_eq!(got, ["reads database", "writes database"]);
     // tokio-postgres: a client and a transaction
@@ -1730,6 +1753,12 @@ fn more_rust_orms() {
     // values that are not a session add no step, even in a file written for these crates
     for lib in ["rusqlite::Connection", "tokio_postgres::Client", "rbatis::RBatis", "mongodb::Collection"] {
         let got = steps(&format!("use {lib};\nuse std::collections::{{HashMap, HashSet}};\n\nfn main() {{ run(); }}\n\nfn run() {{\n    let map: HashMap<u32, u32> = HashMap::new();\n    map.get(&k);\n    v.iter();\n    cache.remove(&k);\n    set.insert(x);\n    map.insert(1, 2);\n    items.update(x);\n    job.execute(x);\n}}\n"));
+        assert_eq!(got, Vec::<String>::new(), "{lib}");
+    }
+    // a real session in the same function: generic names called on other receivers still add no step
+    for (lib, session) in [("rusqlite::Connection", "conn: &Connection"), ("tokio_postgres::Client", "client: &Client"),
+                           ("rbatis::RBatis", "rb: &RBatis"), ("mongodb::Collection", "users: Collection<User>")] {
+        let got = steps(&format!("use {lib};\nuse std::collections::HashMap;\n\nfn main() {{ run(todo!()); }}\n\nfn run({session}) {{\n    let mut map: HashMap<u32, u32> = HashMap::new();\n    map.insert(k, v);\n    cache.remove(&k);\n    set.insert(x);\n    items.update(x);\n    job.execute(x);\n}}\n"));
         assert_eq!(got, Vec::<String>::new(), "{lib}");
     }
     // each library is listed under what it is
