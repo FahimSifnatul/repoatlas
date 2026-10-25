@@ -19,7 +19,7 @@ use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
 use crate::parse::{self, File, Kind};
 use crate::resolve::{basename, dirname, Project};
-use crate::rules::{method_verb, verb_method, CLASS_HANDLER_LANGS};
+use crate::rules::{method_verb, verb_method, CLASS_HANDLER_LANGS, IMPORT_ONLY_NAMES};
 use crate::tables::{cat_of, short as layer_short, toks, ENTRY_STEMS, EXT_CATS, IO, LAYERS, TOKEN_LAYER, WRAPPERS};
 use crate::text::read_para;
 
@@ -1033,7 +1033,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     for nm in &deps {
         // what the dependency files name (gems and composer packages are rarely imported by name)
         let last = nm.rsplit('/').next().unwrap_or(nm);
-        if cat_of(nm).is_some() && !ext_files.contains_key(nm)
+        if cat_of(nm).is_some() && !IMPORT_ONLY_NAMES.contains(&nm.to_lowercase().as_str()) && !ext_files.contains_key(nm)
             && !ext_files.keys().any(|k| cat_of(k).is_some() && k.rsplit('/').next() == Some(last))
         {
             ext_files.entry(nm.clone()).or_default().insert(String::new());
@@ -1044,7 +1044,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
         // the tool a process is run with (gunicorn, celery ...) is part of the stack too
         for c in &P.chain {
             let tool = basename(words(&c.cmd).first().copied().unwrap_or("")).to_string();
-            if cat_of(&tool).is_some() {
+            if cat_of(&tool).is_some() && !IMPORT_ONLY_NAMES.contains(&tool.to_lowercase().as_str()) {
                 ext_files.entry(tool.clone()).or_default().insert(c.file.clone());
                 ext_spec.entry(tool.clone()).or_insert(tool);
             }

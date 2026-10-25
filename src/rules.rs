@@ -9,6 +9,10 @@ fn rx(p: &str) -> Regex {
     Regex::new(p).unwrap()
 }
 
+/// catalogue names (tables::EXT_CATS) that count only where code imports them: as a dependency or a command they are
+/// something else (`ninja` imported is Django Ninja, whose package is `django-ninja`; listed or run, it is the build tool)
+pub const IMPORT_ONLY_NAMES: &[&str] = &["ninja"];
+
 /// calls that put one router under another
 pub const MOUNT_CALLS: &[&str] = &["include_router", "register_blueprint", "use", "mount", "Mount", "add_router"];
 /// calls that make a sub-router with a prefix: `v1 := r.Group("/v1")`

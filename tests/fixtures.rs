@@ -1434,6 +1434,28 @@ fn python_libraries_are_catalogued() {
 }
 
 #[test]
+fn a_name_known_only_as_an_import_does_not_count_from_a_dependency_file() {
+    let stack = |files: &[(&str, &str)]| -> Vec<String> {
+        let d = analyze(files);
+        d["repo"]["stack"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap().to_string()).collect()
+    };
+    // the ninja build tool listed for a C++ extension is not Django Ninja
+    let got = stack(&[("requirements.txt", "ninja\nnumpy\n"), ("main.py", "def run():\n    return 1\n\nif __name__ == \"__main__\":\n    run()\n")]);
+    assert!(!got.iter().any(|l| l == "Web framework"), "{got:?}");
+    let got = stack(&[("pyproject.toml", "[project]\nname = \"x\"\ndependencies = [\"ninja>=1.11\"]\n"), ("main.py", "def run():\n    return 1\n\nif __name__ == \"__main__\":\n    run()\n")]);
+    assert!(!got.iter().any(|l| l == "Web framework"), "{got:?}");
+    // imported, with its package listed: a web framework
+    let got = stack(&[
+        ("requirements.txt", "django-ninja\n"),
+        ("main.py", "from ninja import NinjaAPI\n\napi = NinjaAPI()\n\n@api.get(\"/users\")\ndef users(request):\n    return []\n\nif __name__ == \"__main__\":\n    run(api)\n"),
+    ]);
+    assert_eq!(got, ["Web framework"]);
+    // the package listed alone still counts by its package name
+    let got = stack(&[("requirements.txt", "django-ninja\n"), ("main.py", "def run():\n    return 1\n\nif __name__ == \"__main__\":\n    run()\n")]);
+    assert_eq!(got, ["Web framework"]);
+}
+
+#[test]
 fn go_frameworks() {
     let go = |imports: &str, body: &str| {
         let src = format!("package main\n\nimport (\n\t\"net/http\"\n{imports})\n\nfunc main() {{\n{body}}}\n\nfunc listUsers() {{}}\n");
