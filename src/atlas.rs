@@ -1002,7 +1002,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     let main_lang = lc.iter().find(|(l, _)| !crate::lang::by_name(l).markup).or(lc.first()).map(|x| x.0).unwrap_or("");
     let mut summary = readme_dir.get("").map(|r| read_para(&project.read(r))).unwrap_or_default();
     if summary.is_empty() {
-        summary = format!("A {main_lang} {kind} with {} main parts arranged in {} layers.", units.len(), layers_out.len());
+        summary = format!("A {main_lang} {kind} with {} main parts.", units.len());
     }
     let routes = files.iter().filter(|f| f.layer != Some("tests")).flat_map(|f| f.symbols.iter()).filter(|s| s.k == "route").count();
     let colors: Map<String, Value> = lc.iter().map(|(l, _)| (l.to_string(), json!(LANGS.iter().find(|x| x.name == *l).unwrap().color))).collect();

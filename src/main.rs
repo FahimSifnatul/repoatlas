@@ -94,7 +94,7 @@ fn main() -> ExitCode {
         return fail(&format!("could not write {}: {e}", out.display()));
     }
     let loc = repoatlas::text::thousands(r["loc"].as_u64().unwrap_or(0) as usize);
-    println!("Scanned {} files ({loc} lines): {} layers, {} parts.\nWrote {}", r["files"], data["layers"].as_array().map_or(0, |l| l.len()), r["parts"], out.display());
+    println!("Scanned {} files ({loc} lines): {} parts.\nWrote {}", r["files"], r["parts"], out.display());
     if let Some(s) = r["scip"].as_object() {
         println!("SCIP index: {} of its files, {} calls matched exactly.", s["documents"], s["calls"]);
     }

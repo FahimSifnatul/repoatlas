@@ -52,42 +52,10 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .bar i{display:block;min-width:3px}
 .lang ul{display:flex;gap:4px 16px;flex-wrap:wrap;list-style:none;padding:0;margin-top:8px;font-size:13px;color:var(--ink2)}
 .lang li span{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
-.hint{margin:26px 0 14px;color:var(--ink2);font-size:15px;max-width:70ch}
 
-/* the building: layers as floors joined by a metro line */
-.stack{position:relative;display:flex;flex-direction:column;gap:30px}
-.stack::before{content:"";position:absolute;left:36px;top:40px;bottom:40px;width:3px;background:repeating-linear-gradient(var(--edge) 0 7px,transparent 7px 13px)}
-.floor{--c:#4f5bd5;position:relative;display:grid;grid-template-columns:72px minmax(0,1fr) auto;align-items:center;
-  padding:18px 24px 18px 0;border:1.5px solid color-mix(in srgb,var(--c) 40%,#fff);border-radius:22px;
-  background:color-mix(in srgb,var(--c) 8%,#fff);transition:background .15s,border-color .15s}
-.floor:hover{background:color-mix(in srgb,var(--c) 14%,#fff);border-color:var(--c)}
 .station{width:46px;height:46px;border-radius:50%;background:var(--c);color:#fff;display:grid;place-items:center;margin-left:13px;
   box-shadow:0 0 0 5px color-mix(in srgb,var(--c) 8%,#fff);transition:box-shadow .15s}
-.floor:hover .station{box-shadow:0 0 0 5px color-mix(in srgb,var(--c) 14%,#fff)}
-.fbody{min-width:0}
-.fbody h3{font:700 22px/1.2 var(--display);letter-spacing:-.015em}
-.flink{all:unset;cursor:pointer}
-.flink::after{content:"";position:absolute;inset:0;border-radius:22px}
-.flink:focus-visible::after{outline:3px solid var(--focus);outline-offset:3px}
 .ftag{color:var(--ink2);margin-top:2px}
-.parts{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-.part{position:relative;z-index:1;border:1.5px solid color-mix(in srgb,var(--c) 45%,#fff);background:#fff;border-radius:99px;
-  padding:3px 12px;font:500 13.5px var(--body);color:var(--ink);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-button.part:hover{background:var(--c);color:#fff;border-color:var(--c)}
-.part.more{border-style:dashed;background:transparent;color:var(--ink2)}
-.relies{margin-top:10px;font-size:13px;color:var(--ink3)}
-.fcount{text-align:right;display:flex;flex-direction:column;gap:2px;padding-left:16px}
-.fcount b{font:650 17px var(--display)}
-.fcount span{font-size:13px;color:var(--ink3);white-space:nowrap}
-.around{font:650 18px var(--display);margin:44px 0 6px}
-.around+p{color:var(--ink3);font-size:14px;margin-bottom:14px}
-.support{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
-.support .floor{grid-template-columns:62px minmax(0,1fr) auto;padding:14px 18px 14px 0;border-radius:18px}
-.support .flink::after{border-radius:18px}
-.support .station{width:38px;height:38px;margin-left:12px}
-.support .fbody h3{font-size:18px}
-.settle .floor{animation:settle .5s cubic-bezier(.2,.7,.2,1) both;animation-delay:calc(var(--i)*80ms)}
-@keyframes settle{from{opacity:0;transform:translateY(14px)}}
 
 .callout{display:flex;align-items:center;gap:14px;width:100%;text-align:left;margin-top:36px;padding:16px 20px;border-radius:14px;
   border:1.5px solid var(--ink);background:var(--ink);color:#fff;font:600 16px var(--display)}
@@ -211,11 +179,7 @@ button.tg[aria-expanded=true]{transform:rotate(90deg)}
 
 @media (max-width:720px){
   main{padding:16px 16px 60px}.top .in{padding:0 16px}.repo{display:none}
-  .stack::before{left:30px}
-  .floor{grid-template-columns:58px minmax(0,1fr);padding-right:16px}
   .station{width:40px;height:40px;margin-left:10px}
-  .fcount{grid-column:2;flex-direction:row;gap:12px;text-align:left;padding:8px 0 0}
-  .support{grid-template-columns:1fr}
   .hero{grid-template-columns:1fr;gap:14px}.station.big{width:52px;height:52px}
   .built{grid-template-columns:1fr;gap:4px}
   .sym{grid-template-columns:1fr}.sdoc,.mem{grid-column:1}
@@ -289,7 +253,7 @@ function svg(name, size = 20) {
 /* ---------- navigation ---------- */
 const route = () => decodeURIComponent(location.hash.replace(/^#\/?/, ''));
 const go = id => { location.hash = '#/' + encodeURIComponent(id); };
-const chain = id => { const out = []; for (let c = id; c && N[c]; c = N[c].parent) out.unshift(c); return out; };
+const chain = id => { const out = []; for (let c = id; c && N[c]; c = N[c].parent) if (N[c].kind !== 'layer') out.unshift(c); return out; };   // layers are not pages
 
 /* ---------- small parts ---------- */
 function langbar(langs) {
@@ -404,35 +368,24 @@ function graph({cols, edges, showPath}) {
 }
 const grid = (ids, showPath) => el('div', {class:'grid'}, ids.map(id => card(id, showPath)));
 
-/* ---------- overview: the building ---------- */
-function floor(l, i, slim) {
-  const parts = l.units.map(id => N[id]), shown = parts.slice(0, slim ? 5 : 9);
-  return el('div', {class:'floor', style:`--c:${l.color};--i:${i}`},
-    el('div', {class:'station'}, svg(l.key, slim ? 20 : 24)),
-    el('div', {class:'fbody'},
-      el('h3', {}, el('button', {class:'flink', onclick:() => go('layer:' + l.key)}, l.name)),
-      el('p', {class:'ftag'}, l.tag),
-      el('div', {class:'parts'}, shown.map(p => el('button', {class:'part', title:p.desc, onclick:() => go(p.id)}, p.name)),
-        parts.length > shown.length ? el('span', {class:'part more'}, `+${parts.length - shown.length} more`) : null),
-      l.uses.length ? el('p', {class:'relies'}, 'Relies on ' + l.uses.map(k => LK[k] && LK[k].name).filter(Boolean).join(', ')) : null),
-    el('div', {class:'fcount'}, el('b', {}, pl(parts.length, 'part')), el('span', {}, pl(l.files, 'file'))));
-}
-function overview(first) {
+/* ---------- about: what the project is, at a glance ---------- */
+function overview() {
   const f = document.createDocumentFragment();
   f.append(el('section', {class:'intro'},
     el('h1', {}, R.name),
-    el('p', {class:'lead'}, R.summary),
-    el('p', {class:'facts'}, el('b', {}, `A ${R.kind}`), ` with ${pl(R.files, 'file')} and ${num(R.loc)} lines of code`,
-      R.routes ? `, offering ${pl(R.routes, 'web endpoint')}` : '', `.`,
-      R.runs && R.runs.length > 1 ? ` It runs as ${num(R.runs.length)} programs: ${R.runs.join(', ')}.` : ''),
-    langbar(R.langs)));
-  f.append(el('p', {class:'hint'}, 'Each floor is one layer of the project, and upper floors rely on the floors below. Click a floor to look inside it, or click any part listed on it to jump straight there.'));
-  const main = D.layers.filter(l => l.group === 'stack'), side = D.layers.filter(l => l.group !== 'stack');
-  f.append(el('div', {class:'stack' + (first ? ' settle' : '')}, main.map((l, i) => floor(l, i))));
-  if (side.length) {
-    f.append(el('h2', {class:'around'}, 'Around the app'), el('p', {}, 'Not part of the running program, but part of the project.'));
-    f.append(el('div', {class:'support'}, side.map((l, i) => floor(l, i, true))));
-  }
+    el('p', {class:'lead'}, R.summary)));
+  const tot = R.langs.reduce((a, b) => a + b[1], 0), pct = c => Math.round(c / tot * 100) || '<1';
+  const row = (k, v) => v == null ? null : [el('dt', {}, k), el('dd', {}, v)];
+  f.append(sec('At a glance'));
+  f.append(el('dl', {class:'built'},
+    row('Kind', R.kind),
+    tot ? row('Languages', R.langs.slice(0, 4).map(([l, c]) => el('span', {class:'lib'}, `${l} ${pct(c)}%`))) : null,
+    row('Size', `${pl(R.files, 'file')} and ${num(R.loc)} lines of code`),
+    row('Main parts', num(R.parts)),
+    R.routes ? row('Web endpoints', num(R.routes)) : null,
+    D.flow && D.flow.processes.length ? row(D.flow.processes.length > 1 ? 'Programs' : 'Program', D.flow.processes.map((P, j) =>
+      el('button', {class:'ref', style:'--c:var(--ink)', onclick:() => go('@flow/' + j)}, el('i'), P.name))) : null,
+    R.entries.length ? row('Starting files', R.entries.slice(0, 8).map(id => ref(id))) : null));
   if (R.stack.length || R.libs.length) {
     f.append(sec('Built with', 'The main outside tools this project relies on'));
     f.append(el('dl', {class:'built'},
@@ -443,7 +396,7 @@ function overview(first) {
   return f;
 }
 
-/* ---------- opened layer / part / folder / file ---------- */
+/* ---------- opened part / folder / file ---------- */
 function hero(n) {
   const ly = LK[n.layer], rel = n.kind !== 'file' && n.kind !== 'layer';
   return el('section', {class:'hero', style:`--c:${colorOf(n)}`},
@@ -585,7 +538,7 @@ function render() {
   const id = route(), isFlow = /^@flow(\/|$)/.test(id) && !!D.flow, target = isFlow ? '@flow' : N[id] ? id : '';
   const depth = isFlow ? 1 : target ? chain(target).length + 1 : 0;
   const view = $('view'), crumbs = $('crumbs');
-  view.replaceChildren(isFlow ? flowView(+id.split('/')[1] || 0) : target ? nodeView(N[target]) : overview(first));
+  view.replaceChildren(isFlow ? flowView(+id.split('/')[1] || 0) : target ? nodeView(N[target]) : overview());
   view.classList.remove('zin', 'zout'); void view.offsetWidth;
   if (!first) view.classList.add(depth < lastDepth ? 'zout' : 'zin');
   first = false; lastDepth = depth;
@@ -598,7 +551,7 @@ function render() {
     crumbs.append(i === all.length - 1 ? el('span', {class:'here', 'aria-current':'page'}, t.name) : el('button', {class:'crumb', onclick:() => go(t.id)}, t.name));
   });
   const tabs = $('tabs');
-  tabs.replaceChildren(el('button', {'aria-current': isFlow ? null : 'page', onclick:() => go('')}, 'Layers'),
+  tabs.replaceChildren(el('button', {'aria-current': isFlow ? null : 'page', onclick:() => go('')}, 'About'),
     D.flow ? el('button', {'aria-current': isFlow ? 'page' : null, onclick:() => go('@flow')}, 'How it runs') : null);
   window.scrollTo(0, 0);
   document.title = (isFlow ? 'How it runs - ' : target ? N[target].name + ' - ' : '') + R.name + ' - architecture map';
@@ -610,7 +563,7 @@ addEventListener('hashchange', render);
 addEventListener('keydown', e => {
   if (e.key !== 'Escape' || e.target.closest('input,textarea')) return;
   const id = route();
-  if (/^@flow(\/|$)/.test(id)) go(''); else if (N[id]) go(N[id].parent || '');
+  if (/^@flow(\/|$)/.test(id)) go(''); else if (N[id]) { const up = N[id].parent; go(N[up] && N[up].kind !== 'layer' ? up : ''); }
 });
 render();
 })();

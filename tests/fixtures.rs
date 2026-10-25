@@ -55,6 +55,13 @@ fn steps(p: &Value) -> Vec<(u64, String, String)> {
         .collect()
 }
 
+#[test]
+fn fallback_summary_has_no_layers() {
+    let d = analyze(&[("a.py", "def a():\n    return 1\n"), ("b.py", "from a import a\n\ndef b():\n    return a()\n")]);
+    let s = d["repo"]["summary"].as_str().unwrap();
+    assert!(!s.contains("layers") && s.contains("main parts"), "{s}");
+}
+
 // ---------------------------------------------------------------- the language table
 
 #[test]
