@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{routes_file, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, NAMED_ROUTE_ARGS, NAMED_ROUTE_CALLS, ROUTE_TABLES, ROUTE_TABLE_ENTRY, VIEW_ROUTE_NAME, VIEW_VERB, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -44,6 +44,8 @@ pub struct Def {
     pub route_on: String,
     /// a class's own route prefix: `@RequestMapping("/users")`, `@Controller('users')`
     pub prefix: String,
+    /// a view that answers a route registered elsewhere by name: (route name, verb or "ANY")
+    pub view_for: Option<(String, String)>,
     /// what this definition's own body takes in and gives out (filled by analyze)
     pub io: Vec<&'static str>,
     /// the database calls its own body makes through an ORM: "reads User", "writes database" (filled by analyze)
@@ -81,6 +83,8 @@ pub struct Route {
     pub recv: String,
     /// how the handler is written: `list_items`, `[UserController::class, 'index']` ("" when none is given)
     pub handler: String,
+    /// the name views are joined to it by, when it is registered by name (`add_route("users", "/users")`)
+    pub name: String,
 }
 
 /// (class, function) a handler expression names; the class is "" when only a function is named
@@ -356,6 +360,13 @@ fn decorator_recv(head: &str) -> String {
     RECV.captures(head).map(|c| c[1].to_string()).unwrap_or_default()
 }
 
+/// A view joined to a route by its name: `@view_config(route_name="users", request_method="GET")` -> (users, GET)
+fn view_for(head: &str) -> Option<(String, String)> {
+    let name = VIEW_ROUTE_NAME.captures(head)?[1].to_string();
+    let verb = VIEW_VERB.captures(head).map_or("ANY".to_string(), |c| c[1].to_uppercase());
+    Some((name, verb))
+}
+
 /// A class-wide route prefix: `@RequestMapping("/api")`, `@Controller('users')`, `@RoutePrefix("api")`
 fn class_prefix(head: &str) -> String {
     CLASS_PREFIX.captures(head).map(|c| c[1].to_string()).unwrap_or_default()
@@ -373,7 +384,7 @@ pub fn parse(f: &mut File) {
     let base = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     f.defs.push(Def {
         name: base, kind: Kind::Module, start: 0, end: f.text.len(), line: 1, parent: None, owner: None, bases: vec![],
-        sig: String::new(), doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![], db: vec![],
+        sig: String::new(), doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), view_for: None, io: vec![], db: vec![],
     });
     match key.and_then(|k| lang::GRAMMARS.get(k)) {
         Some(g) => parse_tree(f, &src, g),
@@ -451,6 +462,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     route,
                     route_on: if kind == Kind::Func { decorator_recv(&src[head..name.start_byte()]) } else { String::new() },
                     prefix: if kind == Kind::Class { class_prefix(&src[head..name.start_byte()]) } else { String::new() },
+                    view_for: if kind == Kind::Func { view_for(&src[head..name.start_byte()]) } else { None },
                     io: vec![],
                     db: vec![],
                 });
@@ -472,7 +484,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     defs.push(Def {
                         name: first, kind: Kind::Main, start: node.start_byte(), end: node.end_byte(),
                         line: node.start_position().row + 1, parent: None, owner: None, bases: vec![], sig: String::new(),
-                        doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), io: vec![], db: vec![],
+                        doc: String::new(), route: None, route_on: String::new(), prefix: String::new(), view_for: None, io: vec![], db: vec![],
                     });
                 }
             }
@@ -564,7 +576,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 for (verb, suffix, action) in actions.iter() {
                     f.routes.push(Route {
                         verb: verb.to_string(), path: format!("/{}{suffix}", path.trim_matches('/')), line, at: node.start_byte(), end: node.end_byte(), def,
-                        recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler: format!("{}.{action}", &class[1]),
+                        recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler: format!("{}.{action}", &class[1]), name: String::new(),
                     });
                 }
             }
@@ -607,8 +619,33 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 if INCLUDE.is_match(&handler) {
                     // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
                 } else {
-                    f.routes.push(Route { verb, path, line, at: callee.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler });
+                    f.routes.push(Route { verb, path, line, at: callee.start_byte(), end: node.end_byte(), def, recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler, name: String::new() });
                 }
+            }
+        }
+        // `config.add_route("users", "/users")`: a route by name; the view that names it answers (joined in analyze)
+        if NAMED_ROUTE_CALLS.iter().any(|(l, call)| *l == f.lang.name && *call == name) && in_routes_file.is_none() {
+            if let Some(c) = NAMED_ROUTE_ARGS.captures(&src[callee.end_byte()..node.end_byte()]) {
+                f.routes.push(Route {
+                    verb: "ANY".into(), path: c[2].to_string(), line, at: callee.start_byte(), end: node.end_byte(), def,
+                    recv: recv.rsplit('.').next().unwrap_or("").to_string(), handler: String::new(), name: c[1].to_string(),
+                });
+            }
+        }
+        // `Application([(r"/x", Handler), ..])`: every (path, handler) pair is a route
+        if ROUTE_TABLES.iter().any(|(l, call)| *l == f.lang.name && *call == name) {
+            let base = callee.end_byte();
+            for c in ROUTE_TABLE_ENTRY.captures_iter(&src[base..node.end_byte()]) {
+                let mut path = c[1].to_string();
+                for (re, to) in PATTERN_PARTS.iter() {
+                    path = re.replace_all(&path, *to).into_owned();
+                }
+                let path = if path.starts_with('/') { path } else { format!("/{path}") };
+                let whole = c.get(0).unwrap();
+                f.routes.push(Route {
+                    verb: "ANY".into(), path, line: line_of(src, base + whole.start()), at: base + whole.start(), end: base + whole.end(), def,
+                    recv: String::new(), handler: c[2].to_string(), name: String::new(),
+                });
             }
         }
         f.calls.push(Call { name, recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(), line, def, is_ref: false, cond: cond_of(node) });

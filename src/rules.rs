@@ -72,11 +72,29 @@ pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 /// the methods of a class-based view or viewset that answer requests, by language ("" = any):
-/// a Go controller answers with exported methods `Get`, `Post`
+/// a Go controller answers with exported methods `Get`, `Post`; a Falcon resource with `on_get`, `on_post`
 pub const VERB_METHODS: &[(&str, &[&str])] = &[
     ("", &["get", "post", "put", "patch", "delete", "list", "create", "retrieve", "update", "partial_update", "destroy"]),
     ("Go", &["Get", "Post", "Put", "Patch", "Delete"]),
+    ("Python", &["on_get", "on_post", "on_put", "on_patch", "on_delete"]),
 ];
+
+/// languages where a class (or a new object of it) handed to a route that names no verb answers with its verb methods:
+/// Falcon `app.add_route("/x", UserResource())`, Tornado `(r"/x", UserHandler)`
+pub const CLASS_HANDLER_LANGS: &[&str] = &["Python"];
+
+/// calls whose argument is a list of (path, handler) pairs, by language: Tornado `Application([(r"/x", Handler)])`
+pub const ROUTE_TABLES: &[(&str, &str)] = &[("Python", "Application")];
+/// one (path, handler) pair of a route table
+pub static ROUTE_TABLE_ENTRY: LazyLock<Regex> = LazyLock::new(|| rx(r#"\(\s*[rRbBuU]*['"]([^'"]+)['"]\s*,\s*([\w.]+)\s*[,)]"#));
+
+/// calls that register a route by name, its path second, and a view joined to it elsewhere by that name:
+/// Pyramid `config.add_route("users", "/users")` and `@view_config(route_name="users", request_method="GET")`
+pub const NAMED_ROUTE_CALLS: &[(&str, &str)] = &[("Python", "add_route")];
+pub static NAMED_ROUTE_ARGS: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"]([\w.:-]+)['"]\s*,\s*['"](/[^'"]*)['"]"#));
+/// the decorator of a view that answers a named route, and the verb it answers
+pub static VIEW_ROUTE_NAME: LazyLock<Regex> = LazyLock::new(|| rx(r#"@[\w.]*view_config\([^)]*\broute_name\s*=\s*['"]([^'"]+)['"]"#));
+pub static VIEW_VERB: LazyLock<Regex> = LazyLock::new(|| rx(r#"@[\w.]*view_config\([^)]*\brequest_method\s*=\s*\(?\s*['"](\w+)['"]"#));
 
 /// whether a method of that name, in a file of that language, answers requests
 pub fn verb_method(lang: &str, name: &str) -> bool {
@@ -142,6 +160,11 @@ pub struct Orm {
     pub write_prefixes: &'static [&'static str],
 }
 
+/// what a MongoDB collection handle reads and writes (PyMongo, Motor)
+const MONGO_READS: &[&str] = &["find", "find_one", "count_documents", "estimated_document_count", "aggregate", "distinct"];
+const MONGO_WRITES: &[&str] = &["insert_one", "insert_many", "update_one", "update_many", "delete_one", "delete_many", "replace_one",
+    "bulk_write", "find_one_and_update", "find_one_and_delete", "find_one_and_replace"];
+
 pub static ORMS: &[Orm] = &[
     Orm { name: "Django ORM", lang: "Python", libs: &["django.db"], model_bases: &["Model"], model_attrs: &[], handles: &[],
           reads: &["filter", "get", "all", "first", "last", "exclude", "count", "exists", "values", "values_list", "aggregate", "annotate",
@@ -162,6 +185,31 @@ pub static ORMS: &[Orm] = &[
           writes: &["create", "save", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Pony ORM", lang: "Python", libs: &["pony"], model_bases: &["Entity"], model_attrs: &[], handles: &[],
           reads: &["select", "get", "exists", "count"], writes: &["delete"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "MongoEngine", lang: "Python", libs: &["mongoengine"], model_bases: &["Document", "DynamicDocument"], model_attrs: &[], handles: &[],
+          reads: &["objects", "get", "first", "all", "count", "filter", "reload"],
+          writes: &["save", "delete", "update", "update_one", "insert", "modify"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "Beanie", lang: "Python", libs: &["beanie"], model_bases: &["Document"], model_attrs: &[], handles: &[],
+          reads: &["find", "find_one", "find_all", "find_many", "get", "aggregate", "count"],
+          writes: &["insert", "insert_one", "insert_many", "save", "replace", "update", "set", "upsert", "delete", "delete_all"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "ODMantic", lang: "Python", libs: &["odmantic"], model_bases: &["Model"], model_attrs: &[], handles: &["AIOEngine", "SyncEngine", "Engine"],
+          reads: &["find", "find_one", "count"], writes: &["save", "save_all", "delete", "remove"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "Piccolo", lang: "Python", libs: &["piccolo"], model_bases: &["Table"], model_attrs: &[], handles: &[],
+          reads: &["select", "objects", "count", "exists", "raw"], writes: &["insert", "update", "delete", "save", "remove"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "ormar", lang: "Python", libs: &["ormar"], model_bases: &["Model"], model_attrs: &[], handles: &[],
+          reads: &["get", "get_or_none", "filter", "exclude", "all", "first", "count", "exists", "values", "values_list"],
+          writes: &["create", "save", "update", "delete", "upsert", "bulk_create", "bulk_update", "get_or_create", "update_or_create"], read_prefixes: &[], write_prefixes: &[] },
+    // drivers: a collection or connection handle, no models
+    Orm { name: "PyMongo", lang: "Python", libs: &["pymongo"], model_bases: &[], model_attrs: &[], handles: &["Collection", "Database", "MongoClient"],
+          reads: MONGO_READS, writes: MONGO_WRITES, read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "Motor", lang: "Python", libs: &["motor"], model_bases: &[], model_attrs: &[],
+          handles: &["AsyncIOMotorCollection", "AsyncIOMotorDatabase", "AsyncIOMotorClient"],
+          reads: MONGO_READS, writes: MONGO_WRITES, read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "asyncpg", lang: "Python", libs: &["asyncpg"], model_bases: &[], model_attrs: &[], handles: &["Connection", "Pool"],
+          reads: &["fetch", "fetchrow", "fetchval"], writes: &["execute", "executemany"], read_prefixes: &[], write_prefixes: &[] },
+    // the SQL text is not read: execute counts as a write, fetching its rows as a read
+    Orm { name: "psycopg", lang: "Python", libs: &["psycopg"], model_bases: &[], model_attrs: &[],
+          handles: &["Connection", "Cursor", "AsyncConnection", "AsyncCursor"],
+          reads: &["fetchone", "fetchall", "fetchmany"], writes: &["execute", "executemany"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "GORM", lang: "Go", libs: &["gorm.io", "jinzhu/gorm"], model_bases: &[], model_attrs: &["gorm.Model"], handles: &["gorm.DB"],
           reads: &["Find", "First", "Take", "Last", "Where", "Scan", "Pluck", "Count", "Preload", "Joins", "Rows", "Row"],
           writes: &["Create", "Save", "Update", "Updates", "UpdateColumn", "Delete", "Exec", "FirstOrCreate", "CreateInBatches"], read_prefixes: &[], write_prefixes: &[] },

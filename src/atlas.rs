@@ -19,7 +19,7 @@ use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
 use crate::parse::{self, File, Kind};
 use crate::resolve::{basename, dirname, Project};
-use crate::rules::verb_method;
+use crate::rules::{verb_method, CLASS_HANDLER_LANGS};
 use crate::tables::{cat_of, short as layer_short, toks, ENTRY_STEMS, EXT_CATS, IO, LAYERS, TOKEN_LAYER, WRAPPERS};
 use crate::text::read_para;
 
@@ -724,7 +724,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             for p in fr.iter().filter(|p| !shell_only && lay(&files, p) != "tests") {
                 let fi = ix[p];
                 let f = &files[fi];
-                let mut found: Vec<(String, String, usize, Vec<Gid>, Vec<Gid>)> = vec![];
+                let mut found: Vec<(String, String, usize, Vec<Gid>, Vec<Gid>, bool)> = vec![];
                 // the full path: the prefixes of the routers it is mounted under, the class it is written in, then its own
                 let full = |recv: &str, at: usize, class: &str, path: &str| -> String {
                     let up = mounts.prefix_at(fi, at, recv);
@@ -733,7 +733,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                 for (di, d) in f.defs.iter().enumerate().filter(|(_, d)| d.kind == Kind::Func) {
                     if let Some((verb, path)) = &d.route {
                         let class = d.parent.map(|p| f.defs[p].prefix.as_str()).unwrap_or("");
-                        found.push((verb.clone(), full(&d.route_on, d.start, class, path), d.line, vec![(fi, di)], vec![]));
+                        found.push((verb.clone(), full(&d.route_on, d.start, class, path), d.line, vec![(fi, di)], vec![], false));
                     }
                 }
                 for r in &f.routes {
@@ -788,6 +788,25 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                             }
                         }
                     }
+                    // `add_route("users", "/users")`: the views that name the route answer it; the join is by name only, so a guess
+                    let mut verb = r.verb.clone();
+                    let mut guess = false;
+                    if hs.is_empty() && !r.name.is_empty() {
+                        let views: Vec<(Gid, &str)> = files.iter().enumerate().flat_map(|(i, g)| {
+                            g.defs.iter().enumerate().filter_map(move |(j, d)| match &d.view_for {
+                                Some((n, v)) if *n == r.name => Some(((i, j), v.as_str())),
+                                _ => None,
+                            })
+                        }).collect();
+                        let mut verbs: Vec<&str> = views.iter().map(|(_, v)| *v).collect();
+                        verbs.sort();
+                        verbs.dedup();
+                        if !verbs.is_empty() && !verbs.contains(&"ANY") {
+                            verb = verbs.join("|");
+                        }
+                        guess = !views.is_empty();
+                        hs.extend(views.into_iter().map(|(g, _)| g));
+                    }
                     if hs.is_empty() {
                         // `(req, res) => {...}` written in place: the calls inside it
                         for (ci, c) in f.calls.iter().enumerate() {
@@ -800,9 +819,33 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                             }
                         }
                     }
-                    found.push((r.verb.clone(), full(&r.recv, r.at, "", &r.path), r.line, hs, pre));
+                    // `add_route("/x", UserResource())`, `(r"/x", UserHandler)`: a class answers with its verb methods
+                    if verb == "ANY" && CLASS_HANDLER_LANGS.contains(&f.lang.name) {
+                        // a class named, not called: handing it over runs nothing, so it is found by its name (one class of that name)
+                        let named = r.handler.rsplit('.').next().unwrap_or("");
+                        if hs.is_empty() && !named.is_empty() {
+                            let classes: Vec<Gid> = files.iter().enumerate().flat_map(|(i, g)| {
+                                g.defs.iter().enumerate().filter(move |(_, d)| d.kind == Kind::Class && d.name == named).map(move |(j, _)| (i, j))
+                            }).collect();
+                            if classes.len() == 1 {
+                                hs = classes;
+                            }
+                        }
+                        hs = hs.into_iter().flat_map(|g| {
+                            let c = &files[g.0].defs[g.1];
+                            let methods: Vec<Gid> = if c.kind == Kind::Class {
+                                files[g.0].defs.iter().enumerate()
+                                    .filter(|(_, d)| d.kind == Kind::Func && d.owner.as_deref() == Some(c.name.as_str()) && verb_method(files[g.0].lang.name, &d.name))
+                                    .map(|(j, _)| (g.0, j)).collect()
+                            } else {
+                                vec![]
+                            };
+                            if methods.is_empty() { vec![g] } else { methods }
+                        }).collect();
+                    }
+                    found.push((verb, full(&r.recv, r.at, "", &r.path), r.line, hs, pre, guess));
                 }
-                for (verb, path, line, hs, pre) in found {
+                for (verb, path, line, hs, pre, guess) in found {
                     if routes.len() >= MAX_ROUTES {
                         break;
                     }
@@ -815,7 +858,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                         }
                     }
                     for g in hs {
-                        w.visit(g, 0, "start", false, "");
+                        w.visit(g, 0, "start", guess, "");
                     }
                     let mut io: BTreeSet<usize> = BTreeSet::new();
                     for s in &w.steps {

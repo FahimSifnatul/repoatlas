@@ -1241,6 +1241,195 @@ fn python_orms() {
     assert_eq!(got, Vec::<String>::new()); // SQLModel has no query methods on the class: no invented step
 }
 
+/// every route of the first program: "VERB /path first-steps" (the steps a request starts at, joined by ", "), sorted
+fn route_lines(d: &Value) -> Vec<String> {
+    sorted(procs(d)[0]["routes"].as_array().unwrap().iter().map(|r| {
+        let starts: Vec<&str> = r["steps"].as_array().unwrap().iter().filter(|s| s["d"] == 0).map(|s| s["n"].as_str().unwrap()).collect();
+        format!("{} {} {}", r["verb"].as_str().unwrap(), r["path"].as_str().unwrap(), starts.join(", "))
+    }).collect())
+}
+
+/// whether the first step of the route `path` is marked as a guess
+fn route_guess(d: &Value, path: &str) -> bool {
+    let r = procs(d)[0]["routes"].as_array().unwrap().iter().find(|r| r["path"] == path).cloned().unwrap();
+    r["steps"][0]["guess"] == true
+}
+
+fn py_routes(src: &str) -> Value {
+    analyze(&[("main.py", src)])
+}
+
+#[test]
+fn python_falcon_routes() {
+    // Falcon: a resource object on a path answers with its on_<verb> methods
+    let d = py_routes("import falcon\n\nclass UserResource:\n    def on_get(self, req, resp):\n        resp.media = []\n\n    def on_post(self, req, resp):\n        resp.status = 201\n\n    def helper(self):\n        return 1\n\napp = falcon.App()\napp.add_route(\"/users\", UserResource())\n\nif __name__ == \"__main__\":\n    app.run()\n");
+    assert_eq!(route_lines(&d), ["ANY /users UserResource.on_get(), UserResource.on_post()"]);
+}
+
+#[test]
+fn python_pyramid_routes() {
+    // Pyramid: a named route, and the view that names it; the pairing is read off the name, so it is a guess
+    let d = py_routes("from pyramid.config import Configurator\nfrom pyramid.view import view_config\n\n@view_config(route_name=\"users\", request_method=\"GET\")\ndef list_users(request):\n    return []\n\n@view_config(route_name=\"user\", request_method=\"POST\", renderer=\"json\")\ndef add_user(request):\n    return {}\n\ndef main():\n    with Configurator() as config:\n        config.add_route(\"users\", \"/users\")\n        config.add_route(\"user\", \"/users/{id}\")\n        config.scan()\n        return config.make_wsgi_app()\n\nif __name__ == \"__main__\":\n    main()\n");
+    assert_eq!(route_lines(&d), ["GET /users list_users()", "POST /users/{id} add_user()"]);
+    assert!(route_guess(&d, "/users") && route_guess(&d, "/users/{id}"));
+}
+
+#[test]
+fn python_tornado_routes() {
+    // Tornado: (path, handler class) pairs in the application's list; the handler answers with its verb methods
+    let d = py_routes("import tornado.ioloop\nimport tornado.web\n\nclass MainHandler(tornado.web.RequestHandler):\n    def get(self):\n        self.write(\"hi\")\n\nclass UserHandler(tornado.web.RequestHandler):\n    def get(self, id):\n        self.write(id)\n\n    def post(self, id):\n        self.write(id)\n\ndef make_app():\n    return tornado.web.Application([\n        (r\"/\", MainHandler),\n        (r\"/users/(?P<id>[0-9]+)\", UserHandler),\n    ])\n\nif __name__ == \"__main__\":\n    app = make_app()\n    app.listen(8888)\n    tornado.ioloop.IOLoop.current().start()\n");
+    assert_eq!(route_lines(&d), ["ANY / MainHandler.get()", "ANY /users/{id} UserHandler.get(), UserHandler.post()"]);
+}
+
+#[test]
+fn python_bottle_routes() {
+    // Bottle: bare decorators, and a route on an app object with its method
+    let d = py_routes("from bottle import Bottle, get, route, run\n\napp = Bottle()\n\n@route(\"/hello\")\ndef hello():\n    return \"hi\"\n\n@get(\"/users\")\ndef users():\n    return []\n\n@app.route(\"/items\", method=\"POST\")\ndef add_item():\n    return {}\n\nif __name__ == \"__main__\":\n    run(app)\n");
+    assert_eq!(route_lines(&d), ["ANY /hello hello()", "GET /users users()", "POST /items add_item()"]);
+}
+
+#[test]
+fn python_quart_routes() {
+    // Quart: Flask-style
+    let d = py_routes("from quart import Quart\n\napp = Quart(__name__)\n\n@app.route(\"/users\")\nasync def users():\n    return []\n\n@app.post(\"/users\")\nasync def add_user():\n    return {}\n\nif __name__ == \"__main__\":\n    app.run()\n");
+    assert_eq!(route_lines(&d), ["ANY /users users()", "POST /users add_user()"]);
+}
+
+#[test]
+fn python_django_ninja_routes() {
+    // Django Ninja: verbs on the API and on a router mounted under a prefix
+    let d = py_routes("from ninja import NinjaAPI, Router\n\napi = NinjaAPI()\nrouter = Router()\n\n@api.get(\"/users\")\ndef list_users(request):\n    return []\n\n@router.post(\"/items\")\ndef add_item(request):\n    return {}\n\napi.add_router(\"/shop/\", router)\n\nif __name__ == \"__main__\":\n    run(api)\n");
+    assert_eq!(route_lines(&d), ["GET /users list_users()", "POST /shop/items add_item()"]);
+}
+
+#[test]
+fn python_route_data_does_not_reach_other_languages() {
+    // Go and JS keep their class-less routes: a call that builds a value is not a resource handed over
+    let go = analyze(&[("main.go", "package main\n\nimport \"net/http\"\n\nfunc main() {\n\thttp.Handle(\"/users\", newHandler())\n\thttp.ListenAndServe(\":80\", nil)\n}\n\nfunc newHandler() http.Handler { return nil }\n")]);
+    assert_eq!(route_lines(&go), ["ANY /users newHandler()"]);
+    // JS: a call named like a named-route call, or a list of pairs handed to an `Application`, registers nothing outside Python
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"main.js\"}"),
+        ("main.js", "const app = new Application([['/a', A]])\napp.add_route('users', '/users')\napp.get('/b', (req, res) => res.send(1))\napp.listen(3000)\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /b"]);
+    // Python: a route whose handler names a verb keeps its handler; a class only spreads into its methods when the verb is open
+    let d = analyze(&[("main.py", "from flask import Flask\n\napp = Flask(__name__)\n\nclass Ctl:\n    def get(self):\n        return 1\n\n@app.get(\"/c\")\ndef c():\n    return Ctl()\n\nif __name__ == \"__main__\":\n    app.run()\n")]);
+    assert_eq!(route_lines(&d), ["GET /c c()"]);
+    // a list of pairs handed to a call that is not an application is not a route table
+    let d = analyze(&[("main.py", "import tornado.web\n\ndef run(x):\n    return dict([(\"/a\", x)])\n\nif __name__ == \"__main__\":\n    run(1)\n")]);
+    assert_eq!(procs(&d)[0]["routes"].as_array().map_or(0, |r| r.len()), 0);
+}
+
+/// the database labels of a route that runs `body`, with `params`, `imports` in main.py and `models` in models.py
+fn py_route_db(models: &str, imports: &str, params: &str, body: &str) -> Vec<String> {
+    let main = format!("from fastapi import FastAPI\n{imports}\n\napp = FastAPI()\n\n@app.get(\"/x\")\nasync def x({params}):\n{body}\n");
+    let mut files = vec![("Dockerfile", "FROM python\nCMD [\"uvicorn\", \"main:app\"]\n"), ("main.py", main.as_str())];
+    if !models.is_empty() {
+        files.push(("models.py", models));
+    }
+    db_steps(&analyze(&files), "/x")
+}
+
+#[test]
+fn python_mongoengine_orm() {
+    // MongoEngine: a Document model, queried through objects(..), an instance saved and deleted
+    let got = py_route_db("from mongoengine import Document, StringField\n\nclass User(Document):\n    name = StringField()\n", "from models import User", "",
+                    "    u = User(name=\"x\")\n    u.save()\n    u.delete()\n    return User.objects(name=\"x\").first()");
+    assert_eq!(got, ["writes User", "reads User"]);
+}
+
+#[test]
+fn python_beanie_orm() {
+    // Beanie: a Document from beanie, found and fetched by id, an instance inserted and saved
+    let got = py_route_db("from beanie import Document\n\nclass User(Document):\n    name: str\n", "from models import User", "",
+                    "    u = User(name=\"x\")\n    await u.insert()\n    await u.save()\n    await User.get(1)\n    return await User.find(User.name == \"x\").to_list()");
+    assert_eq!(got, ["writes User", "reads User"]);
+}
+
+#[test]
+fn python_odmantic_orm() {
+    // ODMantic: the engine reads and writes the model it is handed
+    let got = py_route_db("from odmantic import Model\n\nclass User(Model):\n    name: str\n", "from odmantic import AIOEngine\nfrom models import User", "",
+                    "    engine = AIOEngine()\n    await engine.find(User, User.name == \"x\")\n    await engine.find_one(User)\n    await engine.save(User(name=\"y\"))\n    await engine.delete(u)");
+    assert_eq!(got, ["reads User", "writes User", "writes database"]);
+}
+
+#[test]
+fn python_piccolo_orm() {
+    // Piccolo: a Table, read with select/objects, written with insert/update/delete and an instance's save
+    let got = py_route_db("from piccolo.table import Table\nfrom piccolo.columns import Varchar\n\nclass User(Table):\n    name = Varchar()\n", "from models import User", "",
+                    "    await User.select().where(User.name == \"x\")\n    await User.objects().first()\n    await User.insert(User(name=\"x\"))\n    await User.update({User.name: \"y\"}).where(User.id == 1)\n    await User.delete().where(User.id == 1)\n    u = User(name=\"z\")\n    await u.save()");
+    assert_eq!(got, ["reads User", "writes User"]);
+}
+
+#[test]
+fn python_ormar_orm() {
+    // ormar: queries through objects, created through objects, an instance updated
+    let got = py_route_db("import ormar\n\nclass User(ormar.Model):\n    name: str = ormar.String(max_length=100)\n", "from models import User", "",
+                    "    await User.objects.get(id=1)\n    await User.objects.filter(name=\"x\").all()\n    await User.objects.create(name=\"y\")\n    u = User(name=\"z\")\n    await u.update(name=\"w\")\n    await u.delete()");
+    assert_eq!(got, ["reads User", "writes User"]);
+}
+
+#[test]
+fn python_pymongo_orm() {
+    // PyMongo: a collection handed in
+    let got = py_route_db("", "from pymongo.collection import Collection", "users: Collection",
+                    "    users.find_one({\"_id\": 1})\n    users.count_documents({})\n    users.aggregate([])\n    users.insert_one({\"a\": 1})\n    users.update_many({}, {})\n    users.delete_one({})\n    users.replace_one({}, {})");
+    assert_eq!(got, ["reads database", "writes database"]);
+    let got = py_route_db("", "from pymongo.database import Database", "db: Database", "    return db.users.find({})");
+    assert_eq!(got, ["reads database"]);
+}
+
+#[test]
+fn python_motor_orm() {
+    // Motor: the same calls on an async collection
+    let got = py_route_db("", "from motor.motor_asyncio import AsyncIOMotorCollection", "users: AsyncIOMotorCollection",
+                    "    await users.insert_many([])\n    await users.delete_many({})\n    await users.update_one({}, {})");
+    assert_eq!(got, ["writes database"]);
+}
+
+#[test]
+fn python_asyncpg_orm() {
+    // asyncpg: fetches read, execute writes
+    let got = py_route_db("", "import asyncpg", "conn: asyncpg.Connection", "    await conn.fetch(\"SELECT 1\")\n    await conn.fetchrow(\"SELECT 1\")\n    await conn.fetchval(\"SELECT 1\")");
+    assert_eq!(got, ["reads database"]);
+    let got = py_route_db("", "import asyncpg", "pool: asyncpg.Pool", "    await pool.execute(\"DELETE FROM t\")\n    await pool.executemany(\"INSERT INTO t VALUES ($1)\", rows)");
+    assert_eq!(got, ["writes database"]);
+}
+
+#[test]
+fn python_psycopg_orm() {
+    // psycopg: the SQL text is not read, so execute counts as a write; fetching rows reads
+    let got = py_route_db("", "import psycopg", "cur: psycopg.Cursor", "    cur.execute(\"SELECT 1\")\n    return cur.fetchall()");
+    assert_eq!(got, ["writes database", "reads database"]);
+    let got = py_route_db("", "import psycopg", "conn: psycopg.Connection", "    return conn.execute(\"SELECT 1\").fetchone()");
+    assert_eq!(got, ["writes database"]);
+}
+
+#[test]
+fn python_db_libraries_leave_plain_values_alone() {
+    // values that are not a database add no step, even in a file written for these libraries
+    for imports in ["import pymongo\nfrom pymongo.collection import Collection", "import asyncpg", "import psycopg", "from motor.motor_asyncio import AsyncIOMotorCollection",
+                    "from mongoengine import Document", "from beanie import Document", "from odmantic import AIOEngine", "from piccolo.table import Table", "import ormar"] {
+        let got = py_route_db("", imports, "d: dict, cache, items: list", "    d.get(\"k\")\n    cache.delete(key)\n    items.find(\"x\")\n    \"abc\".find(\"x\")");
+        assert_eq!(got, Vec::<String>::new(), "{imports}");
+    }
+}
+
+#[test]
+fn python_libraries_are_catalogued() {
+    // each library is listed under what it is
+    for (lib, label) in [("mongoengine", "Database"), ("beanie", "Database"), ("odmantic", "Database"), ("piccolo", "Database"), ("ormar", "Database"),
+                         ("pymongo", "Database"), ("motor", "Database"), ("asyncpg", "Database"), ("psycopg", "Database"),
+                         ("falcon", "Web framework"), ("pyramid", "Web framework"), ("tornado", "Web framework"), ("bottle", "Web framework"),
+                         ("quart", "Web framework"), ("ninja", "Web framework")] {
+        let d = analyze(&[("main.py", format!("import {lib}\n\nif __name__ == \"__main__\":\n    {lib}.run()\n").as_str())]);
+        let labels: Vec<&str> = d["repo"]["stack"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, [label], "{lib}");
+    }
+}
+
 #[test]
 fn go_frameworks() {
     let go = |imports: &str, body: &str| {
