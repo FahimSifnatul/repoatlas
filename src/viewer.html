@@ -106,6 +106,7 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .node{--c:#4f5bd5;position:relative;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;width:100%;text-align:left;background:#fff;border:1.5px solid var(--line);
   border-left:6px solid var(--c);border-radius:10px;padding:11px 14px 11px;transition:background .12s,border-color .12s,opacity .15s}
 .node:hover{background:color-mix(in srgb,var(--c) 7%,#fff);border-color:var(--c)}
+.map .col{justify-content:flex-start}   /* a long column of parts would push short ones far down the page */
 .node.io{cursor:default;border-style:dashed;border-left-style:solid;background:color-mix(in srgb,var(--c) 6%,#fff)}
 .nm{display:flex;align-items:center;gap:8px;font:650 16px/1.25 var(--display);color:var(--ink)}
 .nm svg{flex:none;color:var(--c)}
@@ -513,8 +514,8 @@ function outline(steps, open, prefix) {
   show();
   return ol;
 }
-// inputs on the left, the parts the program passes through joined by its calls, outputs (and two-way ones) on the right
-const MAP_COL = 8;                         // a taller column wraps into the next, so a big map grows sideways and scrolls
+// inputs on the left, the parts the program passes through joined by its calls, outputs (and two-way ones) on the right;
+// one column per call depth, every part drawn: a wide map scrolls sideways
 function systemMap(F) {
   const has = new Set(F.parts.filter(id => N[id]));
   const partOf = p => { for (let c = p; c && N[c]; c = N[c].parent) if (has.has(c)) return c; return null; };
@@ -525,9 +526,11 @@ function systemMap(F) {
     if (IO[k][1] === 'in') { ins.push(id); to.forEach(p => links.push([id, p, 1])); }
     else { outs.push(id); to.forEach(p => links.push([p, id, 1])); }
   }
-  const lay = layout([...has], F.edges || []);
-  const cols = lay.cols.flatMap(c => Array.from({length:Math.ceil(c.length / MAP_COL)}, (_, j) => c.slice(j * MAP_COL, (j + 1) * MAP_COL)));
-  return graph({cols:[ins, ...cols, outs].filter(c => c.length), edges:[...lay.edges, ...links]});
+  const es = (F.edges || []).filter(e => has.has(e[0]) && has.has(e[1]) && e[0] !== e[1]);
+  const lay = layout([...has], es);
+  const g = graph({cols:[ins, ...lay.cols, outs].filter(c => c.length), edges:[...lay.edges, ...links]});
+  g.classList.add('map');
+  return [lay.edges.length < es.length ? el('p', {class:'ftag'}, 'Some parts call each other; only the first direction is drawn.') : null, g];   // layout() drops back-edges
 }
 function flowView(i) {
   const all = D.flow.processes, F = all[i] || all[0], f = document.createDocumentFragment();
@@ -543,8 +546,8 @@ function flowView(i) {
     ioRow('Takes in', Object.keys(F.io || {}), 'in', F.io), ioRow('Gives out', Object.keys(F.io || {}), 'out', F.io),
     F.parts.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Passes through'), chips(F.parts, 16)) : null));
   if (F.parts.some(id => N[id])) {
-    f.append(sec('The map', 'What comes in on the left, what goes out on the right. Lines run from a part to the parts it calls. Click a part to open it.'));
-    f.append(systemMap(F));
+    f.append(sec('The map', 'What comes in on the left, what goes out on the right. Lines run from a part to the parts it calls. An input or output box links only to the parts of the first four files that use it. Click a part to open it.'));
+    f.append(...systemMap(F).filter(Boolean));
   }
   f.append(sec('Step by step', 'One line per step, in the order the code runs. Indented steps happen inside the step above. Click a name to open its file.'));
   f.append(outline(F.steps, 3, 's'));
