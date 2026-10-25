@@ -1281,6 +1281,88 @@ fn go_orms() {
 }
 
 #[test]
+fn more_go_frameworks() {
+    // every route of a one-file program: "VERB /path handler"
+    let go = |imports: &str, body: &str| {
+        let src = format!("package main\n\nimport (\n{imports})\n\nfunc main() {{\n{body}}}\n\nfunc listUsers() {{}}\n\nfunc getUser() {{}}\n");
+        let d = analyze(&[("main.go", src.as_str())]);
+        route_paths(&procs(&d)[0]).into_iter().map(|r| {
+            let first = route_first(&d, r.split(' ').nth(1).unwrap()).unwrap_or_default();
+            format!("{r} {first}")
+        }).collect::<Vec<_>>()
+    };
+    // Beego: a route function on the web package, and a namespace-free controller-less handler
+    let r = go("\t\"github.com/beego/beego/v2/server/web\"\n", "\tweb.Get(\"/users\", listUsers)\n\tweb.Post(\"/users/:id\", getUser)\n\tweb.Run()\n");
+    assert_eq!(r, ["GET /users listUsers()", "POST /users/:id getUser()"]);
+    // Beego: a controller registered on a path answers with its verb methods
+    let src = "package main\n\nimport \"github.com/beego/beego/v2/server/web\"\n\ntype UserController struct {\n\tweb.Controller\n}\n\nfunc (c *UserController) Get() {}\n\nfunc (c *UserController) Post() {}\n\nfunc main() {\n\tweb.Router(\"/users\", &UserController{})\n\tweb.Run()\n}\n";
+    let d = analyze(&[("main.go", src)]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["ANY /users"]);
+    let names: Vec<String> = procs(&d)[0]["routes"][0]["steps"].as_array().unwrap().iter().map(|s| s["n"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["UserController.Get()", "UserController.Post()"]);
+    // Iris: a party is a group with a prefix
+    let r = go("\t\"github.com/kataras/iris/v12\"\n", "\tapp := iris.New()\n\tusers := app.Party(\"/users\")\n\tusers.Get(\"/{id}\", getUser)\n\tapp.Listen(\":8080\")\n");
+    assert_eq!(r, ["GET /users/{id} getUser()"]);
+    // Hertz: Gin-style verbs on a group
+    let r = go("\t\"github.com/cloudwego/hertz/pkg/app/server\"\n", "\th := server.Default()\n\tv1 := h.Group(\"/v1\")\n\tv1.GET(\"/users\", listUsers)\n\th.Spin()\n");
+    assert_eq!(r, ["GET /v1/users listUsers()"]);
+}
+
+#[test]
+fn more_go_orms() {
+    let steps = |imports: &str, body: &str| {
+        let src = format!("package main\n\nimport (\n{imports})\n\nfunc main() {{ run(nil) }}\n\nfunc run(db {body}\n");
+        db_steps(&analyze(&[("main.go", src.as_str())]), "")
+    };
+    // pgx: queries read, Exec and CopyFrom write
+    let got = steps("\t\"github.com/jackc/pgx/v5/pgxpool\"\n", "*pgxpool.Pool) {\n\tdb.QueryRow(ctx, \"SELECT 1\")\n\tdb.Exec(ctx, \"DELETE FROM t\")\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    let got = steps("\t\"github.com/jackc/pgx/v5\"\n", "*pgx.Conn) {\n\tdb.CopyFrom(ctx, pgx.Identifier{\"t\"}, cols, rows)\n}\n");
+    assert_eq!(got, ["writes database"]);
+    // xorm: a struct with xorm tags is a model the call names
+    let got = steps("\t\"xorm.io/xorm\"\n", "*xorm.Engine) {\n\tvar n int\n\tdb.Where(\"id = ?\", 1).Get(&n)\n\tdb.Insert(&User{})\n}\n\ntype User struct {\n\tID int64 `xorm:\"pk autoincr\"`\n}\n");
+    assert_eq!(got, ["reads database", "writes User"]);
+    // Beego ORM: the session comes from orm.NewOrm()
+    let got = steps("\t\"github.com/beego/beego/v2/client/orm\"\n", "int) {\n\to := orm.NewOrm()\n\to.QueryTable(\"user\").Filter(\"id\", 1).One(&u)\n\to.Delete(&u)\n}\n");
+    assert_eq!(got, ["reads database", "writes database"]);
+    // values that are not a session add no step, even in a file written for an ORM
+    let got = steps("\t\"github.com/jackc/pgx/v5/pgxpool\"\n", "*pgxpool.Pool) {\n\tm.Get(\"k\")\n\tcache.Delete(k)\n\tm.Query(\"x\")\n}\n");
+    assert_eq!(got, Vec::<String>::new());
+    // each library is listed under what it is
+    for (lib, label) in [("xorm.io/xorm", "Database"), ("github.com/beego/beego/v2/client/orm", "Database"), ("github.com/sqlc-dev/sqlc", "Database"),
+                         ("github.com/kataras/iris/v12", "Web framework"), ("github.com/cloudwego/hertz/pkg/app/server", "Web framework"),
+                         ("github.com/beego/beego/v2/server/web", "Web framework")] {
+        let d = analyze(&[("main.go", format!("package main\n\nimport \"{lib}\"\n\nfunc main() {{}}\n").as_str())]);
+        let labels: Vec<&str> = d["repo"]["stack"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, [label], "{lib}");
+    }
+}
+
+#[test]
+fn sqlc_queries() {
+    let generated = ("db/db.go", "package db\n\ntype DBTX interface{}\n\nfunc New(db DBTX) *Queries {\n\treturn &Queries{db: db}\n}\n\ntype Queries struct {\n\tdb DBTX\n}\n");
+    // the generated method names say what they do: Get/List read, Create/Delete write
+    let d = analyze(&[
+        generated,
+        ("main.go", "package main\n\nimport \"app/db\"\n\nfunc main() { run(nil) }\n\nfunc run(q *db.Queries) {\n\tq.GetUser(ctx, 1)\n\tq.ListUsers(ctx)\n\tq.CreateUser(ctx, \"x\")\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["reads database", "writes database"]);
+    // the handle made by the generated constructor, held in a struct field
+    let d = analyze(&[
+        generated,
+        ("main.go", "package main\n\nimport \"app/db\"\n\ntype Server struct {\n\tq *db.Queries\n}\n\nfunc main() {\n\ts := &Server{q: db.New(nil)}\n\ts.remove()\n}\n\nfunc (s *Server) remove() {\n\ts.q.DeleteUser(ctx, 1)\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["writes database"]);
+    // a prefix only counts on a session: a map's Get and a cache's Delete are not the database,
+    // and another package's New() does not hand out the generated Queries
+    let d = analyze(&[
+        generated,
+        ("main.go", "package main\n\nimport (\n\t\"app/db\"\n\t\"github.com/gofiber/fiber/v2\"\n)\n\nfunc main() { run(nil) }\n\nfunc run(q *db.Queries) {\n\tapp := fiber.New()\n\tapp.Get(\"k\")\n\tm.Get(\"k\")\n\tcache.Delete(k)\n\tq.Getaway()\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+}
+
+#[test]
 fn rust_frameworks() {
     // Rocket: an attribute with a typed segment
     let (_, r) = one_route_set(&[("src/main.rs", "#[get(\"/users/<id>\")]\nfn user(id: u32) {}\n\nfn main() {}\n")]);

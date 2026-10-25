@@ -40,7 +40,7 @@ pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// call names that register a web endpoint: app.get("/x", handler), mux.HandleFunc("/x", h)
 pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
     "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch", "at", "add_route", "add_api_route",
-    "add_url_rule", "add_get", "add_post", "add_put", "add_delete", "add_patch"];
+    "add_url_rule", "add_get", "add_post", "add_put", "add_delete", "add_patch", "Router"];
 /// call names that register a route only when called bare: `Route("/x", handler)` (a method called `Route` makes a group instead)
 pub const ROUTE_BARE: &[&str] = &["Route"];
 /// the keyword that carries the handler: `add_url_rule("/x", view_func=users)`
@@ -63,6 +63,8 @@ pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // a class-based view: every verb method of the class runs
         rx(r"^(?:[\w.]+\.)?(?P<class>\w+)\.as_view\(.*\)$"),
+        // a controller value: `&UserController{}`
+        rx(r"^&?(?:\w+\.)*(?P<class>\w+)\{\s*\}$"),
         rx(r#"^\[\s*(?:[\w\\]+\\)?(?P<class>\w+)(?:::class|\.class)?\s*,\s*['"](?P<func>\w+)['"]\s*\]$"#),
         rx(r#"^['"](?:[\w\\]+\\)?(?P<class>\w+)@(?P<func>\w+)['"]$"#),
         rx(r"^(?:[\w$]+(?:\.|::))*(?P<class>[\w$]+)(?:\.|::)(?P<func>[\w$]+)$"),
@@ -70,7 +72,8 @@ pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 /// the methods of a class-based view or viewset that answer requests
-pub const VERB_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "list", "create", "retrieve", "update", "partial_update", "destroy"];
+pub const VERB_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "list", "create", "retrieve", "update", "partial_update", "destroy",
+    "Get", "Post", "Put", "Patch", "Delete"];
 /// a path written as a regular expression, turned into the path people see: `^articles/(?P<slug>[-\w]+)/?$` -> articles/{slug}
 pub static PATTERN_PARTS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![(rx(r"\(\?P<(\w+)>[^)]*\)"), "{$1}"), (rx(r"/\?\$$"), ""), (rx(r"\$$"), ""), (rx(r"^\^"), "")]
@@ -125,56 +128,72 @@ pub struct Orm {
     pub reads: &'static [&'static str],
     /// names called on a model, a session or an instance that write
     pub writes: &'static [&'static str],
+    /// how generated method names start when they read: `GetUser`, `ListUsers` (`Get` then a capital letter)
+    pub read_prefixes: &'static [&'static str],
+    /// how generated method names start when they write: `CreateUser`, `DeleteUser`
+    pub write_prefixes: &'static [&'static str],
 }
 
 pub static ORMS: &[Orm] = &[
     Orm { name: "Django ORM", lang: "Python", libs: &["django.db"], model_bases: &["Model"], model_attrs: &[], handles: &[],
           reads: &["filter", "get", "all", "first", "last", "exclude", "count", "exists", "values", "values_list", "aggregate", "annotate",
                    "select_related", "prefetch_related", "in_bulk", "latest", "earliest"],
-          writes: &["save", "create", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"] },
+          writes: &["save", "create", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "SQLAlchemy", lang: "Python", libs: &["sqlalchemy"], model_bases: &["Base", "DeclarativeBase"], model_attrs: &[],
           handles: &["Session", "AsyncSession", "scoped_session"],
           reads: &["query", "get", "scalars", "scalar", "scalar_one", "execute", "all", "first", "one", "one_or_none", "filter", "filter_by", "count"],
-          writes: &["add", "add_all", "delete", "merge", "commit", "flush", "bulk_save_objects", "bulk_insert_mappings"] },
+          writes: &["add", "add_all", "delete", "merge", "commit", "flush", "bulk_save_objects", "bulk_insert_mappings"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "SQLModel", lang: "Python", libs: &["sqlmodel"], model_bases: &["SQLModel"], model_attrs: &[], handles: &["Session"],
           reads: &["exec", "get", "scalars", "all", "first", "one", "one_or_none"],
-          writes: &["add", "add_all", "delete", "merge", "commit", "flush"] },
+          writes: &["add", "add_all", "delete", "merge", "commit", "flush"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Peewee", lang: "Python", libs: &["peewee"], model_bases: &["Model"], model_attrs: &[], handles: &[],
           reads: &["select", "get", "get_or_none", "get_by_id", "where", "count", "exists", "first"],
-          writes: &["create", "save", "delete_instance", "insert", "insert_many", "update", "delete", "get_or_create", "replace"] },
+          writes: &["create", "save", "delete_instance", "insert", "insert_many", "update", "delete", "get_or_create", "replace"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Tortoise ORM", lang: "Python", libs: &["tortoise"], model_bases: &["Model"], model_attrs: &[], handles: &[],
           reads: &["filter", "get", "all", "first", "exclude", "get_or_none", "count", "exists", "values", "values_list", "annotate"],
-          writes: &["create", "save", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"] },
+          writes: &["create", "save", "update", "delete", "bulk_create", "bulk_update", "get_or_create", "update_or_create"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Pony ORM", lang: "Python", libs: &["pony"], model_bases: &["Entity"], model_attrs: &[], handles: &[],
-          reads: &["select", "get", "exists", "count"], writes: &["delete"] },
+          reads: &["select", "get", "exists", "count"], writes: &["delete"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "GORM", lang: "Go", libs: &["gorm.io", "jinzhu/gorm"], model_bases: &[], model_attrs: &["gorm.Model"], handles: &["gorm.DB"],
           reads: &["Find", "First", "Take", "Last", "Where", "Scan", "Pluck", "Count", "Preload", "Joins", "Rows", "Row"],
-          writes: &["Create", "Save", "Update", "Updates", "UpdateColumn", "Delete", "Exec", "FirstOrCreate", "CreateInBatches"] },
+          writes: &["Create", "Save", "Update", "Updates", "UpdateColumn", "Delete", "Exec", "FirstOrCreate", "CreateInBatches"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "sqlx", lang: "Go", libs: &["jmoiron/sqlx"], model_bases: &[], model_attrs: &[], handles: &["sqlx.DB", "sqlx.Tx", "sqlx.Conn"],
           reads: &["Get", "Select", "Query", "Queryx", "QueryRow", "QueryRowx", "QueryContext", "QueryRowContext", "GetContext", "SelectContext", "NamedQuery"],
-          writes: &["Exec", "ExecContext", "MustExec", "NamedExec", "NamedExecContext"] },
+          writes: &["Exec", "ExecContext", "MustExec", "NamedExec", "NamedExecContext"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "database/sql", lang: "Go", libs: &["database/sql"], model_bases: &[], model_attrs: &[], handles: &["sql.DB", "sql.Tx", "sql.Conn"],
-          reads: &["Query", "QueryRow", "QueryContext", "QueryRowContext"], writes: &["Exec", "ExecContext"] },
+          reads: &["Query", "QueryRow", "QueryContext", "QueryRowContext"], writes: &["Exec", "ExecContext"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "ent", lang: "Go", libs: &["entgo.io"], model_bases: &[], model_attrs: &[], handles: &["ent.Client", "ent.Tx"],
           reads: &["Query", "All", "Only", "First", "Count", "Exist", "Get", "IDs"],
-          writes: &["Create", "Update", "UpdateOne", "Delete", "DeleteOne", "Save", "Exec"] },
+          writes: &["Create", "Update", "UpdateOne", "Delete", "DeleteOne", "Save", "Exec"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Bun", lang: "Go", libs: &["uptrace/bun"], model_bases: &[], model_attrs: &[], handles: &["bun.DB", "bun.Tx"],
-          reads: &["NewSelect", "Scan", "ScanAndCount", "Count", "Exists"], writes: &["NewInsert", "NewUpdate", "NewDelete", "Exec"] },
+          reads: &["NewSelect", "Scan", "ScanAndCount", "Count", "Exists"], writes: &["NewInsert", "NewUpdate", "NewDelete", "Exec"], read_prefixes: &[], write_prefixes: &[] },
+    // generated code: the method names are the queries the developer named
+    Orm { name: "sqlc", lang: "Go", libs: &["Queries"], model_bases: &[], model_attrs: &[], handles: &["Queries"], reads: &[], writes: &[],
+          read_prefixes: &["Get", "List", "Find", "Count", "Search"], write_prefixes: &["Create", "Update", "Delete", "Insert", "Upsert"] },
+    Orm { name: "pgx", lang: "Go", libs: &["jackc/pgx"], model_bases: &[], model_attrs: &[], handles: &["pgxpool.Pool", "pgx.Conn", "pgx.Tx"],
+          reads: &["Query", "QueryRow"], writes: &["Exec", "SendBatch", "CopyFrom"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "xorm", lang: "Go", libs: &["xorm.io", "go-xorm/xorm"], model_bases: &[], model_attrs: &["xorm:\""], handles: &["xorm.Engine", "xorm.Session"],
+          reads: &["Get", "Find", "FindAndCount", "Count", "Exist", "Iterate", "Rows", "Sum", "Query", "QueryString", "QueryInterface", "Where", "SQL"],
+          writes: &["Insert", "InsertOne", "Update", "Delete", "Exec", "Commit"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "Beego ORM", lang: "Go", libs: &["beego/v2/client/orm", "astaxie/beego/orm"], model_bases: &[], model_attrs: &[],
+          handles: &["orm.Ormer", "orm.NewOrm"],
+          reads: &["Read", "ReadOrCreate", "ReadForUpdate", "QueryTable", "Raw", "LoadRelated"],
+          writes: &["Insert", "InsertMulti", "InsertOrUpdate", "Update", "Delete", "Exec"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "SQLx", lang: "Rust", libs: &["sqlx"], model_bases: &[], model_attrs: &[],
           handles: &["PgPool", "MySqlPool", "SqlitePool", "PgConnection", "MySqlConnection", "SqliteConnection", "Pool", "Transaction"],
-          reads: &["fetch_all", "fetch_one", "fetch_optional", "fetch"], writes: &["execute"] },
+          reads: &["fetch_all", "fetch_one", "fetch_optional", "fetch"], writes: &["execute"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Diesel", lang: "Rust", libs: &["diesel"], model_bases: &[], model_attrs: &["Queryable", "Insertable", "Identifiable", "AsChangeset"],
           handles: &["PgConnection", "MysqlConnection", "SqliteConnection", "Pool"],
-          reads: &["load", "first", "get_result", "get_results"], writes: &["execute"] },
+          reads: &["load", "first", "get_result", "get_results"], writes: &["execute"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "SeaORM", lang: "Rust", libs: &["sea_orm"], model_bases: &[], model_attrs: &["DeriveEntityModel"],
           handles: &["DatabaseConnection", "DatabaseTransaction"],
-          reads: &["all", "one", "count", "paginate"], writes: &["insert", "update", "delete", "save", "exec"] },
+          reads: &["all", "one", "count", "paginate"], writes: &["insert", "update", "delete", "save", "exec"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Eloquent", lang: "PHP", libs: &["Illuminate\\Database\\Eloquent"], model_bases: &["Model", "Authenticatable", "Pivot"], model_attrs: &[], handles: &[],
           reads: &["where", "find", "first", "get", "all", "count", "pluck", "findOrFail", "firstOrFail", "paginate", "with", "orderBy", "exists", "select"],
-          writes: &["create", "save", "update", "delete", "destroy", "insert", "updateOrCreate", "firstOrCreate", "forceDelete"] },
+          writes: &["create", "save", "update", "delete", "destroy", "insert", "updateOrCreate", "firstOrCreate", "forceDelete"], read_prefixes: &[], write_prefixes: &[] },
     Orm { name: "Doctrine", lang: "PHP", libs: &["Doctrine\\ORM"], model_bases: &[],
           model_attrs: &["#[ORM\\Entity", "@ORM\\Entity", "@Entity"], handles: &["EntityManagerInterface", "EntityManager", "ObjectManager"],
           reads: &["find", "findAll", "findBy", "findOneBy", "createQueryBuilder", "getResult", "getOneOrNullResult", "getSingleResult", "createQuery"],
-          writes: &["persist", "remove", "flush", "merge"] },
-    Orm { name: "PDO", lang: "PHP", libs: &["PDO"], model_bases: &[], model_attrs: &[], handles: &["PDO"], reads: &["query", "prepare"], writes: &["exec"] },
+          writes: &["persist", "remove", "flush", "merge"], read_prefixes: &[], write_prefixes: &[] },
+    Orm { name: "PDO", lang: "PHP", libs: &["PDO"], model_bases: &[], model_attrs: &[], handles: &["PDO"], reads: &["query", "prepare"], writes: &["exec"], read_prefixes: &[], write_prefixes: &[] },
 ];

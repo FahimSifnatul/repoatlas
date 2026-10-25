@@ -124,7 +124,8 @@ pub fn handles(f: &File, getters: &HashMap<String, usize>) -> Vec<(String, usize
             let ty = regex::escape(ty);
             let forms = [
                 format!(r"(\$?\w+)\s*:\s*(?:&\s*(?:mut\s+)?|\*)?(?:\w+(?:\.|::))*{ty}\b"),
-                format!(r"(\$?\w+)\s+\*?{ty}\b"),
+                // `q *db.Queries`: the type may be named through its package
+                format!(r"(\$?\w+)\s+\*?(?:\w+\.)*{ty}\b"),
                 format!(r"\b{ty}\s+(\$\w+)"),
                 format!(r"(\$?\w+)\s*:?=\s*(?:\w+(?:\.|::))*{ty}\s*[(\[{{]"),
             ];
@@ -243,8 +244,12 @@ pub fn accesses(code: &str, handles: &[(String, usize)], models: &HashMap<String
         }
         let verbs = |oi: usize| {
             let o = &ORMS[oi];
-            let write = methods.iter().any(|x| o.writes.contains(x));
-            let read = methods.iter().any(|x| o.reads.contains(x));
+            // a generated name: the prefix, then the next word (`GetUser`, not `Get` or `Getaway`)
+            let starts = |x: &str, prefixes: &[&str]| {
+                prefixes.iter().any(|p| x.strip_prefix(p).is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase())))
+            };
+            let write = methods.iter().any(|x| o.writes.contains(x) || starts(x, o.write_prefixes));
+            let read = methods.iter().any(|x| o.reads.contains(x) || starts(x, o.read_prefixes));
             (read, write)
         };
         let label = if let (Some(&oi), false) = (models.get(w), member) {
