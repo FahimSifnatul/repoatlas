@@ -71,9 +71,17 @@ pub static HANDLER_FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         rx(r"^(?P<func>[\w$]+)$"),
     ]
 });
-/// the methods of a class-based view or viewset that answer requests
-pub const VERB_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "list", "create", "retrieve", "update", "partial_update", "destroy",
-    "Get", "Post", "Put", "Patch", "Delete"];
+/// the methods of a class-based view or viewset that answer requests, by language ("" = any):
+/// a Go controller answers with exported methods `Get`, `Post`
+pub const VERB_METHODS: &[(&str, &[&str])] = &[
+    ("", &["get", "post", "put", "patch", "delete", "list", "create", "retrieve", "update", "partial_update", "destroy"]),
+    ("Go", &["Get", "Post", "Put", "Patch", "Delete"]),
+];
+
+/// whether a method of that name, in a file of that language, answers requests
+pub fn verb_method(lang: &str, name: &str) -> bool {
+    VERB_METHODS.iter().any(|(l, ms)| (l.is_empty() || *l == lang) && ms.contains(&name))
+}
 /// a path written as a regular expression, turned into the path people see: `^articles/(?P<slug>[-\w]+)/?$` -> articles/{slug}
 pub static PATTERN_PARTS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![(rx(r"\(\?P<(\w+)>[^)]*\)"), "{$1}"), (rx(r"/\?\$$"), ""), (rx(r"\$$"), ""), (rx(r"^\^"), "")]

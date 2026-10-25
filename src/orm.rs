@@ -62,17 +62,40 @@ pub fn models(files: &[File]) -> HashMap<String, usize> {
     out
 }
 
+/// a function that hands out a database session, and where it is declared
+pub struct Getter {
+    pub orm: usize,
+    /// the file it is declared in
+    pub path: String,
+    /// the names a call qualifies it with: its folder (a Go package) and its file stem (a module): `common.GetDB()`, `db::pool()`
+    pub places: Vec<String>,
+    /// a method of a class: called on an object (`self.db()`, `$this->em()`), any qualifier is that object
+    pub method: bool,
+}
+
+impl Getter {
+    /// `x := q.Name(..)`, written in `path`: whether it calls this function and not another of the same name
+    fn called(&self, qualifier: Option<&str>, path: &str, own_def: bool) -> bool {
+        match qualifier {
+            _ if self.method => true,
+            Some(q) => self.places.iter().any(|p| p == q.trim_start_matches('$')),
+            // unqualified: this one, unless the calling file declares its own function of that name
+            None => path == self.path || !own_def,
+        }
+    }
+}
+
 /// what the repo's ORM-related names are: model classes, and functions that hand out a database session
 pub struct Index {
     pub models: HashMap<String, usize>,
-    /// `func GetDB() *gorm.DB`, `def get_db() -> Session`: name -> ORM
-    pub getters: HashMap<String, usize>,
+    /// `func GetDB() *gorm.DB`, `def get_db() -> Session`: name -> every function of that name that hands one out
+    pub getters: HashMap<String, Vec<Getter>>,
     /// names declared as a session anywhere (a struct field `db: PgPool`): they hold one in the other files too
     pub names: Vec<(String, usize)>,
 }
 
 pub fn index(files: &[File]) -> Index {
-    let mut getters = HashMap::new();
+    let mut getters: HashMap<String, Vec<Getter>> = HashMap::new();
     for f in files {
         for (oi, o) in mine(f) {
             for d in f.defs.iter().filter(|d| d.kind == Kind::Func) {
@@ -94,7 +117,10 @@ pub fn index(files: &[File]) -> Index {
                     }
                 }
                 if close.is_some_and(|c| o.handles.iter().any(|h| line[c..].contains(h))) {
-                    getters.insert(d.name.clone(), oi);
+                    let dir = f.path.rsplit_once('/').map_or("", |(d, _)| d);
+                    let stem = crate::resolve::basename(&f.path).split('.').next().unwrap_or("");
+                    let places = [crate::resolve::basename(dir), stem].into_iter().filter(|p| !p.is_empty()).map(String::from).collect();
+                    getters.entry(d.name.clone()).or_default().push(Getter { orm: oi, path: f.path.clone(), places, method: d.owner.is_some() });
                 }
             }
         }
@@ -116,7 +142,7 @@ pub fn sessions(f: &File, ix: &Index) -> Vec<(String, usize)> {
 }
 
 /// names a file holds a database session in: `db: Session`, `pool: &PgPool`, `db *gorm.DB`, `Connection $pdo`, `s = Session(..)`
-pub fn handles(f: &File, getters: &HashMap<String, usize>) -> Vec<(String, usize)> {
+pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String, usize)> {
     const NOT_NAMES: &[&str] = &["return", "var", "func", "type", "struct", "chan", "go", "case", "range", "new", "mut", "let", "const", "use"];
     let mut out = vec![];
     for (oi, o) in mine(f) {
@@ -138,12 +164,17 @@ pub fn handles(f: &File, getters: &HashMap<String, usize>) -> Vec<(String, usize
             }
         }
     }
-    // `db := common.GetDB()`: the function says what it hands back
+    // `db := common.GetDB()`: the function says what it hands back, when the call names that function
+    // (`errors.New()` is not the `New` of another package)
     if !getters.is_empty() {
         let names = getters.keys().map(|n| regex::escape(n)).collect::<Vec<_>>().join("|");
-        let re = Regex::new(&format!(r"(\$?\w+)\s*(?:,\s*\w+\s*)?:?=\s*(?:\w+(?:\.|::|->))*({names})\s*\(")).unwrap();
+        let re = Regex::new(&format!(r"(\$?\w+)\s*(?:,\s*\w+\s*)?:?=\s*((?:\$?\w+(?:\.|::|->))*)({names})\s*\(")).unwrap();
         for c in re.captures_iter(&f.code) {
-            out.push((c[1].trim_start_matches('$').to_string(), getters[&c[2]]));
+            let qualifier = c[2].trim_end_matches(['.', ':', '-', '>']).rsplit(['.', ':', '>']).next().filter(|q| !q.is_empty());
+            let own_def = f.defs.iter().any(|d| d.kind == Kind::Func && d.name == c[3]);
+            if let Some(g) = getters[&c[3]].iter().find(|g| g.called(qualifier, &f.path, own_def)) {
+                out.push((c[1].trim_start_matches('$').to_string(), g.orm));
+            }
         }
     }
     out.sort();

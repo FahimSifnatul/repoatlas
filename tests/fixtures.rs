@@ -1363,6 +1363,71 @@ fn sqlc_queries() {
 }
 
 #[test]
+fn a_session_getter_counts_only_where_the_call_names_it() {
+    let generated = ("db/db.go", "package db\n\ntype DBTX interface{}\n\nfunc New(db DBTX) *Queries {\n\treturn &Queries{db: db}\n}\n\ntype Queries struct {\n\tdb DBTX\n}\n");
+    // the generated constructor, called through its package from elsewhere and bare inside its own package
+    let d = analyze(&[
+        generated,
+        ("go.mod", "module app\n"),
+        ("db/seed.go", "package db\n\nfunc Seed(conn DBTX) {\n\tqueries := New(conn)\n\tqueries.CreateUser(ctx, \"x\")\n}\n"),
+        ("main.go", "package main\n\nimport \"app/db\"\n\nfunc main() { run(nil) }\n\nfunc run(conn db.DBTX) {\n\tq := db.New(conn)\n\tq.GetUser(ctx, 1)\n\tdb.Seed(conn)\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["reads database", "writes database"]);
+    // another package's New: called through that package, or bare inside it, hands out no session
+    let d = analyze(&[
+        generated,
+        ("other/other.go", "package other\n\ntype Thing struct{}\n\nfunc New() *Thing { return &Thing{} }\n\nfunc Use() {\n\tt := New()\n\tt.GetFoo()\n}\n"),
+        ("main.go", "package main\n\nimport (\n\t\"errors\"\n\t\"app/other\"\n)\n\nfunc main() { run() }\n\nfunc run() {\n\tx := errors.New(\"e\")\n\tx.GetFoo()\n\tt := other.New()\n\tt.GetFoo()\n\tother.Use()\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+    // the getters other languages already had keep working: Python bare import, Go through its package (a_session_returned_by_a_function_is_a_session)
+    let d = analyze(&[
+        ("deps.py", "from sqlalchemy.orm import Session\n\ndef get_db() -> Session:\n    return Session()\n"),
+        ("main.py", "from sqlalchemy.orm import Session\nfrom deps import get_db\n\ndef run():\n    db = get_db()\n    db.commit()\n\nif __name__ == '__main__':\n    run()\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["writes database"]);
+}
+
+#[test]
+fn a_package_qualified_handle_changes_nothing_outside_go() {
+    // Python: `with orm.Session() as s` and `import x.Session` name a type through dots but declare no session variable
+    let d = analyze(&[
+        ("main.py", "from sqlalchemy import orm\nimport sqlalchemy.orm.Session\n\ndef run(d):\n    with orm.Session() as s:\n        d.get(\"a\")\n        s.commit()\n\nif __name__ == '__main__':\n    run({})\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+    // Rust paths use `::`, PHP variables `$`: same output as before the change
+    let rust = analyze(&[("src/main.rs", "use sqlx::PgPool;\n\nfn main() { read(todo!()); }\n\nasync fn read(pool: &sqlx::PgPool) {\n    let other = cfg.PgPool;\n    sqlx::query(\"SELECT 1\").fetch_all(pool).await;\n    other.fetch_all();\n}\n")]);
+    assert_eq!(db_steps(&rust, ""), ["reads database"]);
+    let php = analyze(&[("public/index.php", "<?php\nfunction q(\\PDO $pdo, $cfg) { $x = $cfg . PDO; $x->query('a'); return $pdo->query('SELECT 1'); }\nq(null, 1);\n")]);
+    assert_eq!(db_steps(&php, ""), ["reads database"]);
+}
+
+#[test]
+fn go_controller_data_does_not_reach_other_languages() {
+    // JS: express.Router() takes no path, so it is a router, not a route
+    let d = analyze(&[
+        ("package.json", "{\"name\":\"x\",\"main\":\"main.js\",\"dependencies\":{\"express\":\"4\"}}"),
+        ("main.js", "const express = require('express')\nconst app = express()\nconst r = express.Router()\nr.get('/a', (req, res) => res.send(1))\napp.use(r)\napp.listen(3000)\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /a"]);
+    // Python: a class view's capitalised helper is not a verb method
+    let d = analyze(&[
+        ("main.py", "import urls\nimport views\n\nif __name__ == \"__main__\":\n    urls.urlpatterns\n"),
+        ("urls.py", "from django.urls import path\nfrom views import ItemView\n\nurlpatterns = [path(\"items/\", ItemView.as_view())]\n"),
+        ("views.py", "class ItemView:\n    def post(self, request):\n        return 1\n\n    def Get(self):\n        return 2\n"),
+    ]);
+    let names: Vec<String> = procs(&d)[0]["routes"][0]["steps"].as_array().unwrap().iter().map(|s| s["n"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["ItemView.post()"]);
+    // PHP: a controller class with Get/Post methods registered as a whole: only the usual resource actions
+    let (d, _) = one_route_set(&[
+        ("public/index.php", "<?php\nrequire __DIR__ . '/../routes/web.php';\n"),
+        ("routes/web.php", "<?php\nRoute::get('/items', ItemController::class);\n"),
+        ("app/Http/Controllers/ItemController.php", "<?php\nclass ItemController {\n    public function Get() {}\n    public function Post() {}\n}\n"),
+    ]);
+    assert_eq!(route_first(&d, "/items"), None);
+}
+
+#[test]
 fn rust_frameworks() {
     // Rocket: an attribute with a typed segment
     let (_, r) = one_route_set(&[("src/main.rs", "#[get(\"/users/<id>\")]\nfn user(id: u32) {}\n\nfn main() {}\n")]);

@@ -19,7 +19,7 @@ use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
 use crate::parse::{self, File, Kind};
 use crate::resolve::{basename, dirname, Project};
-use crate::rules::VERB_METHODS;
+use crate::rules::verb_method;
 use crate::tables::{cat_of, short as layer_short, toks, ENTRY_STEMS, EXT_CATS, IO, LAYERS, TOKEN_LAYER, WRAPPERS};
 use crate::text::read_para;
 
@@ -778,7 +778,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                                 g.defs.iter().enumerate()
                                     .filter(move |(_, d)| {
                                         d.kind == Kind::Func
-                                            && if func.is_empty() { VERB_METHODS.contains(&d.name.as_str()) } else { d.name == func }
+                                            && if func.is_empty() { verb_method(g.lang.name, &d.name) } else { d.name == func }
                                             && (d.owner.as_deref() == Some(class.as_str()) || module == class)
                                     })
                                     .map(move |(j, _)| (i, j))
