@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use crate::finder::Finder;
 use crate::graph::{self, Gid};
-use crate::journey::{step_io, steps_json, Ctx, Walk, MAX_ROUTES, MAX_ROUTE_STEPS, MAX_STEPS};
+use crate::journey::{step_io, steps_json, Ctx, Step, Walk, MAX_ROUTES, MAX_ROUTE_STEPS, MAX_STEPS};
 use crate::lang::LANGS;
 use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
@@ -843,6 +843,24 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                     parts.push(u.clone());
                 }
             }
+            // the map's arrows: a step's part to the part of each step nested right under it
+            let mut edges: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+            for list in std::iter::once(&steps).chain(routes.iter().map(|r| &r.1)) {
+                let mut above: Vec<&Step> = vec![];
+                for s in list.iter().filter(|s| s.kind != "more") {
+                    while above.last().is_some_and(|a| a.depth >= s.depth) {
+                        above.pop();
+                    }
+                    if let Some(a) = above.last() {
+                        let (ua, ub) = (unit_of[&files[a.file].path].as_str(), unit_of[&files[s.file].path].as_str());
+                        if ua != ub {
+                            *edges.entry((ua, ub)).or_default() += 1;
+                        }
+                    }
+                    above.push(s);
+                }
+            }
+            let edges: Vec<Value> = edges.into_iter().map(|((a, b), n)| json!([a, b, n])).collect();
             seen_units.extend(fr.iter().map(|p| unit_of[p].clone()));
             seen_units.extend(parts.iter().cloned());
             for p in &P.also {
@@ -930,7 +948,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             out.push(json!({
                 "name": P.name, "command": short(&P.cmd), "narrative": text, "entries": P.starts, "chain": chain_files,
                 "steps": steps_json(&ctx, &steps), "routes": routes.into_iter().map(|r| r.0).collect::<Vec<_>>(),
-                "parts": parts, "io": io_map,
+                "parts": parts, "edges": edges, "io": io_map,
             }));
         }
         let mut unreached: Vec<&String> = ulayer.keys().filter(|u| !seen_units.contains(*u) && ulayer[*u] != "tests").collect();

@@ -106,6 +106,7 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .node{--c:#4f5bd5;position:relative;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;width:100%;text-align:left;background:#fff;border:1.5px solid var(--line);
   border-left:6px solid var(--c);border-radius:10px;padding:11px 14px 11px;transition:background .12s,border-color .12s,opacity .15s}
 .node:hover{background:color-mix(in srgb,var(--c) 7%,#fff);border-color:var(--c)}
+.node.io{cursor:default;border-style:dashed;border-left-style:solid;background:color-mix(in srgb,var(--c) 6%,#fff)}
 .nm{display:flex;align-items:center;gap:8px;font:650 16px/1.25 var(--display);color:var(--ink)}
 .nm svg{flex:none;color:var(--c)}
 .nm span{min-width:0;overflow-wrap:anywhere}
@@ -308,7 +309,15 @@ function layout(ids, edges) {
   return {cols, edges: keep.map(([a, b]) => [a, b, w[a + '>' + b]])};
 }
 
+const isIo = id => id.startsWith('io:');
+const tint = id => isIo(id) ? WAY[IO[id.slice(3)][1]] : colorOf(N[id]);
 function card(id, showPath) {
+  if (isIo(id)) {                         // what the program takes in or gives out: not a page, so not clickable
+    const k = id.slice(3);
+    return el('div', {class:'node io', style:`--c:${tint(id)}`, 'data-id':id},
+      el('div', {class:'nm'}, el('span', {}, IO[k][0])),
+      el('p', {class:'ds'}, SAYS[IO[k][1]]));
+  }
   const n = N[id];
   const meta = n.kind === 'file'
     ? [el('span', {}, el('b', {}, fmt(n.loc)), ' lines'), n.symbols.length ? el('span', {}, el('b', {}, n.symbols.length), n.symbols.length === 1 ? ' item' : ' items') : null]
@@ -341,7 +350,7 @@ function graph({cols, edges, showPath}) {
       if (!ea || !eb) continue;
       const x1 = ea.offsetLeft + ea.offsetWidth, y1 = ea.offsetTop + ea.offsetHeight / 2;
       const x2 = eb.offsetLeft - 7, y2 = eb.offsetTop + eb.offsetHeight / 2, dx = Math.max(36, (x2 - x1) / 2);
-      const col = colorOf(N[a]);
+      const col = tint(a);
       const p = document.createElementNS(NS, 'path');
       p.setAttribute('class', cv ? 'e conv' : 'e'); p.style.stroke = col;
       p.setAttribute('stroke-width', (1.6 + Math.min(2.4, Math.log2((wt || 1) + 1) * 0.55)).toFixed(2));
@@ -504,6 +513,22 @@ function outline(steps, open, prefix) {
   show();
   return ol;
 }
+// inputs on the left, the parts the program passes through joined by its calls, outputs (and two-way ones) on the right
+const MAP_COL = 8;                         // a taller column wraps into the next, so a big map grows sideways and scrolls
+function systemMap(F) {
+  const has = new Set(F.parts.filter(id => N[id]));
+  const partOf = p => { for (let c = p; c && N[c]; c = N[c].parent) if (has.has(c)) return c; return null; };
+  const ins = [], outs = [], links = [];
+  for (const [k, files] of Object.entries(F.io || {})) {
+    if (!IO[k]) continue;
+    const id = 'io:' + k, to = [...new Set(files.map(partOf).filter(Boolean))];
+    if (IO[k][1] === 'in') { ins.push(id); to.forEach(p => links.push([id, p, 1])); }
+    else { outs.push(id); to.forEach(p => links.push([p, id, 1])); }
+  }
+  const lay = layout([...has], F.edges || []);
+  const cols = lay.cols.flatMap(c => Array.from({length:Math.ceil(c.length / MAP_COL)}, (_, j) => c.slice(j * MAP_COL, (j + 1) * MAP_COL)));
+  return graph({cols:[ins, ...cols, outs].filter(c => c.length), edges:[...lay.edges, ...links]});
+}
 function flowView(i) {
   const all = D.flow.processes, F = all[i] || all[0], f = document.createDocumentFragment();
   f.append(el('section', {class:'intro'},
@@ -517,6 +542,10 @@ function flowView(i) {
       F.entries.map(id => ref(id))),
     ioRow('Takes in', Object.keys(F.io || {}), 'in', F.io), ioRow('Gives out', Object.keys(F.io || {}), 'out', F.io),
     F.parts.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Passes through'), chips(F.parts, 16)) : null));
+  if (F.parts.some(id => N[id])) {
+    f.append(sec('The map', 'What comes in on the left, what goes out on the right. Lines run from a part to the parts it calls. Click a part to open it.'));
+    f.append(systemMap(F));
+  }
   f.append(sec('Step by step', 'One line per step, in the order the code runs. Indented steps happen inside the step above. Click a name to open its file.'));
   f.append(outline(F.steps, 3, 's'));
   if (F.routes.length) {

@@ -480,6 +480,25 @@ fn inputs_and_outputs_reach_the_flow() {
     assert_eq!(strs(&d["io"]["file_out"]), ["Files", "out"]);
 }
 
+#[test]
+fn process_edges_join_units() {
+    let d = analyze(&[
+        ("app/main.py", "from core.lib import work\n\nif __name__ == '__main__':\n    work()\n"),
+        ("core/lib.py", "def work():\n    return 1\n"),
+    ]);
+    let p = &procs(&d)[0];
+    assert_eq!(sorted(strs(&p["parts"])), ["app", "core"]);
+    assert_eq!(p["edges"], serde_json::json!([["app", "core", 1]]));
+}
+
+#[test]
+fn process_edges_empty_for_one_unit() {
+    let d = analyze(&[("main.py", "def a():\n    return b()\n\ndef b():\n    return 1\n\nif __name__ == '__main__':\n    a()\n")]);
+    let p = &procs(&d)[0];
+    assert_eq!(steps(p).len(), 3);
+    assert_eq!(p["edges"], serde_json::json!([]));
+}
+
 // ---------------------------------------------------------------- journeys: every step, in order
 
 #[test]
