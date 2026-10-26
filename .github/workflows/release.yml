@@ -5,7 +5,7 @@ name: release
 # Two ways to trigger it:
 #   - bump `version` in Cargo.toml and push to master: this tags vX.Y.Z on that commit and releases it
 #     (a push whose version is already tagged does nothing)
-#   - or push a tag such as v2.0.0 yourself; it must match the version in Cargo.toml
+#   - or push a tag such as v2.0.1 yourself; it must match the version in Cargo.toml
 on:
   push:
     branches: [master]
@@ -83,6 +83,7 @@ jobs:
     needs: [tag, build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4          # install.sh is attached to the release too
       - uses: actions/download-artifact@v4
         with:
           path: out
@@ -92,4 +93,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.tag.outputs.tag }}
         # --target creates the tag on this commit when it does not exist yet (a version bump pushed to master)
-        run: gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+        run: gh release create "$TAG" out/* install.sh --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes

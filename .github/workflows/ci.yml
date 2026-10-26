@@ -24,13 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5    # the installer tests are written in Python; the installer itself needs no Python
-        with:
-          python-version: "3.12"
       - name: Lint the shell scripts
         run: shellcheck -s sh install.sh
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Installer tests
-        run: python -m unittest tests/test_install.py -v
+        run: cargo test --locked --test install
       - name: Install from this checkout, as a user would
         run: |
           sh install.sh

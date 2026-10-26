@@ -4,7 +4,7 @@
 # Puts ONE self-contained program called `repoatlas` on your PATH. No sudo, nothing else is touched,
 # and once it is installed you can delete everything you downloaded.
 #
-#   curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh
+#   curl -fsSL https://github.com/FahimSifnatul/repoatlas/releases/latest/download/install.sh | sh
 #   ./install.sh                  from a clone of the repo (builds from the clone)
 #   ./install.sh --uninstall      remove it again
 #
@@ -13,7 +13,7 @@
 #
 # Optional environment variables:
 #   REPOATLAS_INSTALL_DIR      where to put the file             (default: ~/.local/bin)
-#   REPOATLAS_VERSION          release tag such as v2.0.0        (default: the latest release)
+#   REPOATLAS_VERSION          release tag such as v2.0.1        (default: the latest release)
 #   REPOATLAS_NO_MODIFY_PATH=1 do not edit any shell startup file
 #   REPOATLAS_REPO, REPOATLAS_BASE_URL, REPOATLAS_REF   for forks, mirrors and testing
 
@@ -44,7 +44,7 @@ repoatlas installer: puts one self-contained program called `repoatlas` on your 
   install.sh --uninstall        remove it again
   install.sh --no-modify-path   do not edit shell startup files
 
-Environment: REPOATLAS_INSTALL_DIR (default ~/.local/bin), REPOATLAS_VERSION (e.g. v2.0.0),
+Environment: REPOATLAS_INSTALL_DIR (default ~/.local/bin), REPOATLAS_VERSION (e.g. v2.0.1),
 REPOATLAS_NO_MODIFY_PATH=1. Needs curl or wget; building from source needs Rust's cargo.
 EOF
 }

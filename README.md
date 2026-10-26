@@ -8,43 +8,64 @@ Point `repoatlas` at a repository and it writes one self-contained HTML page: an
 
 ## Install
 
-Needs [Rust](https://rustup.rs) (one command, no sudo) and git.
+### macOS, Linux, WSL
+
+No Rust needed:
 
 ```sh
-git clone https://github.com/FahimSifnatul/repoatlas.git
-cd repoatlas
-./install.sh
+curl -fsSL https://github.com/FahimSifnatul/repoatlas/releases/latest/download/install.sh | sh
 ```
 
-This builds a release binary and copies it to `~/.local/bin`, adding that folder to your `PATH` if needed. Open a **new terminal** and check:
+This downloads the latest release binary for your machine, checks its SHA-256, and copies it to `~/.local/bin`, adding that folder to your `PATH` if needed. If there is no binary for your machine it builds from source instead (needs [Rust](https://rustup.rs)). Open a **new terminal** and check:
 
 ```sh
 repoatlas --version
 ```
 
+### Windows
+
+1. Download `repoatlas-windows-x86_64.exe` from the [latest release](https://github.com/FahimSifnatul/repoatlas/releases/latest).
+2. Rename it to `repoatlas.exe`.
+3. Move it to a folder on your `PATH`, then run `repoatlas --version` in a new terminal.
+
+### With cargo (any OS)
+
+Needs [Rust](https://rustup.rs) 1.82 or newer:
+
+```sh
+cargo install --locked repoatlas
+```
+
+To build the unreleased `master` instead: `cargo install --locked --git https://github.com/FahimSifnatul/repoatlas`. Remove it with `cargo uninstall repoatlas`.
+
+### From a clone
+
+```sh
+git clone https://github.com/FahimSifnatul/repoatlas.git
+cd repoatlas
+git checkout "$(git tag --sort=-v:refname | head -1)"   # the latest release tag; skip for unreleased master
+./install.sh
+```
+
 The binary is self-contained, so the clone can be deleted afterwards.
+
+### Manual download
+
+Every [release](https://github.com/FahimSifnatul/repoatlas/releases/latest) file works on its own: download it, `chmod +x` it, and put it on your `PATH`. On macOS, if it was downloaded with a browser, also run `xattr -d com.apple.quarantine repoatlas`.
+
+### Options
+
+Shown for the one-line install; with a clone, run `./install.sh` instead of `curl … | sh`.
 
 | Task | Command |
 |---|---|
-| Install elsewhere | `REPOATLAS_INSTALL_DIR=/usr/local/bin ./install.sh` |
-| Leave shell startup files alone | `./install.sh --no-modify-path` |
-| Update | `git pull && ./install.sh` |
-| Uninstall | `./install.sh --uninstall` |
+| Install a specific version | `curl -fsSL <url> \| REPOATLAS_VERSION=v2.0.1 sh` |
+| Install elsewhere | `curl -fsSL <url> \| REPOATLAS_INSTALL_DIR=/usr/local/bin sh` |
+| Leave shell startup files alone | `curl -fsSL <url> \| sh -s -- --no-modify-path` |
+| Update | run the install command again |
+| Uninstall | `curl -fsSL <url> \| sh -s -- --uninstall` |
 
-Prefer cargo? `cargo install --path .` puts it in `~/.cargo/bin`.
-
-<details>
-<summary><b>Without a clone</b></summary>
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/FahimSifnatul/repoatlas/master/install.sh | sh
-```
-
-Downloads the release binary for your machine, checks its SHA-256, and installs it the same way. If no binary exists for your machine it builds from source (needs cargo). Pin a version with `REPOATLAS_VERSION=v2.0.0`.
-
-macOS, Linux and WSL are supported by the script. On Windows, take `repoatlas-windows-x86_64.exe` from the [latest release](https://github.com/FahimSifnatul/repoatlas/releases/latest), or run `cargo install --git https://github.com/FahimSifnatul/repoatlas`.
-
-</details>
+`<url>` is `https://github.com/FahimSifnatul/repoatlas/releases/latest/download/install.sh`.
 
 ## Use
 

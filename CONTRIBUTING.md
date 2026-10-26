@@ -9,7 +9,7 @@ git clone https://github.com/FahimSifnatul/repoatlas.git && cd repoatlas
 cargo run --release -- .                      # run it on itself
 cargo test                                    # the fixture repositories and the command
 cargo clippy --all-targets -- -D warnings     # CI fails on any warning
-python3 -m unittest tests/test_install.py     # the installer, if you touched install.sh
+cargo test --test install                     # the installer, if you touched install.sh
 shellcheck -s sh install.sh                   # lint the installer, if you touched it
 ```
 
@@ -32,7 +32,7 @@ src/
   tables.rs                 data only: layers, file-name words, library catalogue, input / output patterns
   viewer.html               the interactive page (plain CSS and JS, no build step)
 tests/fixtures.rs           a small repository per case, and the command
-tests/test_install.py       the installer
+tests/install.rs            the installer
 examples/                   dump.rs (print a syntax tree), calls.rs (print what each call resolves to), sample output
 install.sh                  the one-line installer
 ```
