@@ -511,6 +511,7 @@ pub fn parse(f: &mut File) {
         || (!f.lang.entry_re.is_empty() && f.lang.entry_re.iter().all(|p| Regex::new(p).unwrap().is_match(&f.bare)));
     file_routes(f);
     imports(f);
+    template_calls(f);
     symbols(f);
 }
 
@@ -863,6 +864,27 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
             name: name.to_string(), recv: recv.to_string(), at, end: node.end_byte(), from: node.start_byte(),
             line: node.start_position().row + 1, def: innermost(at, &f.defs), is_ref: true, cond: cond_of(node),
         });
+    }
+    f.calls.sort_by_key(|c| c.at);
+}
+
+/// Vue / Svelte markup is blanked out of the code (so offsets stay right): a tag that names an imported component renders it.
+/// Runs once the imports are read.
+fn template_calls(f: &mut File) {
+    if !f.lang.script_blocks {
+        return;
+    }
+    static SCRIPT: LazyLock<Regex> = LazyLock::new(|| rx(r"(?is)<script\b[^>]*>.*?</script>"));
+    static TAG: LazyLock<Regex> = LazyLock::new(|| rx(r"<([A-Za-z][\w-]*)"));
+    let norm = |s: &str| s.replace('-', "").to_lowercase();
+    let markup = SCRIPT.replace_all(&f.text, |c: &regex::Captures| c[0].chars().map(|ch| if ch == '\n' { '\n' } else { ' ' }).collect::<String>()).into_owned();
+    let names: Vec<String> = f.aliases.iter().cloned().chain(f.named.iter().map(|n| n.0.clone())).filter(|a| a.starts_with(|ch: char| ch.is_ascii_uppercase())).collect();
+    for c in TAG.captures_iter(&markup) {
+        let m = c.get(1).unwrap();
+        if let Some(name) = names.iter().find(|a| norm(a) == norm(m.as_str())) {
+            // the component is the file it was imported from, as `User.render()` would be
+            f.calls.push(Call { name: name.clone(), recv: name.clone(), at: m.start(), end: m.end(), from: m.start(), line: line_of(&f.text, m.start()), def: 0, is_ref: false, cond: "" });
+        }
     }
     f.calls.sort_by_key(|c| c.at);
 }

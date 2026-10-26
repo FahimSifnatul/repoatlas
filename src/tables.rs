@@ -95,7 +95,9 @@ pub const EXT_CATS: &[(&str, &str, &str)] = &[
         github.com/astaxie/beego/orm mongoengine beanie odmantic piccolo ormar tokio-postgres tokio_postgres rbatis drizzle-orm @mikro-orm \
         microsoft.entityframeworkcore dapper npgsql activerecord sequel slick doobie org.jetbrains.exposed"),
     ("ui", "UI framework", "react react-dom vue svelte @angular/core preact solid-js lit tkinter pyqt5 pyqt6 \
-        pyside2 pyside6 streamlit gradio kivy jquery @mui/material antd"),
+        pyside2 pyside6 streamlit gradio kivy jquery @mui/material antd \
+        react-router react-router-dom vue-router @tanstack/react-query @tanstack/vue-query swr pinia vuex redux react-redux @reduxjs/toolkit \
+        zustand mobx recoil jotai nuxt-link vuetify quasar element-plus primevue @chakra-ui @headlessui @radix-ui"),
     ("queue", "Messaging & jobs", "celery rq dramatiq kafka confluent_kafka kafkajs amqplib pika bull bullmq nats sidekiq resque masstransit"),
     ("cloud", "Cloud & SaaS", "boto3 botocore aws-sdk @aws-sdk google.cloud @google-cloud firebase firebase-admin \
         supabase azure stripe twilio sendgrid slack_sdk @slack"),

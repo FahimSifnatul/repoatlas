@@ -504,6 +504,12 @@ impl<'a> Index<'a> {
         if c.is_ref {
             return (self.resolve_ref(fi, c, imported, folder, types), Conf::Near);
         }
+        // `<Card/>` in a template (parse::template_calls): the component is the file the name was imported from, or what that names
+        if f.lang.script_blocks && !recv.is_empty() && recv == name {
+            let file = f.bound.iter().find(|(a, _)| a == name).and_then(|(_, p)| self.by_path.get(p.as_str()).copied()).filter(|&i| i != fi);
+            let v = file.map(|i| vec![(i, 0)]).unwrap_or_else(|| self.via_import(fi, name, 0));
+            return (v, Conf::Exact);
+        }
         let owner = self.owner_of(fi, c.def);
         // 1. self.x() / this.x(): the class it is written in (and the classes that override it)
         if SELF.contains(&recv) || (recv.is_empty() && f.lang.implicit_this && owner.is_some()) {

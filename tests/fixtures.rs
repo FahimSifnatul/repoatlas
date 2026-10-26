@@ -2517,3 +2517,31 @@ fn endpoints_after_the_listed_ones_stay_on_the_map() {
     assert_eq!(procs(&d)[0]["routes"].as_array().unwrap().len(), 40);
     assert!(strs(&d["flow"]["map"]["parts"]).iter().any(|p| p.contains("svc")), "{:?}", d["flow"]["map"]["parts"]);
 }
+
+#[test]
+fn vue_and_svelte_templates_render_the_components_they_name() {
+    let d = analyze(&[
+        ("src/main.js", "import { createApp } from 'vue'\nimport App from './App.vue'\ncreateApp(App).mount('#app')\n"),
+        ("src/App.vue", "<template><div><user-card/><Side/><Array/></div></template>\n<script setup lang=\"ts\">\nimport UserCard from './UserCard.vue'\nimport Side from './Side.vue'\nconst xs: Array<Side> = []\n</script>\n"),
+        ("src/UserCard.vue", "<template><b/></template>\n<script>\nexport default { name: 'UserCard' }\n</script>\n"),
+        ("src/Side.vue", "<template><i/></template>\n<script>\nexport default { name: 'Side' }\n</script>\n"),
+    ]);
+    let p = &procs(&d)[0];
+    let files: Vec<String> = step_files(p).into_iter().map(|x| x.0).collect();
+    assert!(files.contains(&"src/UserCard.vue".to_string()) && files.contains(&"src/Side.vue".to_string()), "{files:?}");
+    assert_eq!(files.iter().filter(|f| f.as_str() == "src/Side.vue").count(), 1, "{files:?}"); // the generic `Array<Side>` in the script is no tag
+}
+
+#[test]
+fn react_components_render_the_components_they_name() {
+    let d = analyze(&[
+        ("src/index.jsx", "import React from 'react'\nimport { createRoot } from 'react-dom/client'\nimport App from './App'\n\ncreateRoot(document.getElementById('root')).render(<App />)\n"),
+        ("src/App.jsx", "import Header from './Header'\nimport { Footer } from './parts'\n\nexport default function App() {\n  return <div><Header title=\"x\" /><Footer /></div>\n}\n"),
+        ("src/Header.jsx", "export default function Header() {\n  return <h1 />\n}\n"),
+        ("src/parts.jsx", "export function Footer() {\n  return <p />\n}\n"),
+    ]);
+    let files: Vec<String> = step_files(&procs(&d)[0]).into_iter().map(|x| x.0).collect();
+    for f in ["src/App.jsx", "src/Header.jsx", "src/parts.jsx"] {
+        assert!(files.contains(&f.to_string()), "{f} missing: {files:?}");
+    }
+}
