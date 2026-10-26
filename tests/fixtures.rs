@@ -1569,6 +1569,21 @@ fn go_frameworks() {
 }
 
 #[test]
+fn go_methods_of_unexported_types_answer_the_routes_they_are_handed_to() {
+    // `handler *placementHandler` is a parameter, and `handler.getPlacements` is handed over, not called
+    let d = analyze(&[
+        ("go.mod", "module shop\n"),
+        ("main.go", "package main\n\nimport (\n\t\"github.com/labstack/echo/v4\"\n\t\"shop/api\"\n)\n\nfunc main() {\n\te := echo.New()\n\tapi.NewPlacementHandler(e)\n\te.Start(\":80\")\n}\n"),
+        // two functions call their parameter `handler`, each of a different type
+        ("api/routes.go", "package api\n\nimport \"github.com/labstack/echo/v4\"\n\nfunc placementRoutes(e *echo.Echo, handler *placementHandler) {\n\tg := e.Group(\"/v1\")\n\tg.GET(\"/placements\", handler.getPlacements)\n}\n\nfunc tagRoutes(e *echo.Echo, handler *tagHandler) {\n\te.GET(\"/v1/tags\", handler.listTags)\n}\n"),
+        ("api/placement_handler.go", "package api\n\nimport \"github.com/labstack/echo/v4\"\n\ntype placementHandler struct{}\n\nfunc NewPlacementHandler(e *echo.Echo) {\n\thandler := &placementHandler{}\n\tplacementRoutes(e, handler)\n}\n\nfunc (ph *placementHandler) getPlacements(c echo.Context) error {\n\treturn nil\n}\n\ntype tagHandler struct{}\n\nfunc (th *tagHandler) listTags(c echo.Context) error {\n\treturn nil\n}\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /v1/placements", "GET /v1/tags"]);
+    assert_eq!(route_first(&d, "/v1/placements").as_deref(), Some("placementHandler.getPlacements()"));
+    assert_eq!(route_first(&d, "/v1/tags").as_deref(), Some("tagHandler.listTags()"));
+}
+
+#[test]
 fn go_orms() {
     let steps = |imports: &str, body: &str| {
         let src = format!("package main\n\nimport (\n{imports})\n\nfunc main() {{ run(nil) }}\n\nfunc run(db {body}\n");

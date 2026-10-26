@@ -367,7 +367,7 @@ impl<'a> Index<'a> {
     }
 
     /// a function handed to another call: `Thread(target=run)`, `app.use(routes)`, `for_each(parse::parse)`
-    fn resolve_ref(&self, fi: usize, c: &Call, imported: &HashSet<usize>, folder: &HashSet<usize>) -> Vec<Gid> {
+    fn resolve_ref(&self, fi: usize, c: &Call, imported: &HashSet<usize>, folder: &HashSet<usize>, types: &HashMap<String, String>) -> Vec<Gid> {
         let f = &self.files[fi];
         let fam = family(f.lang);
         let name = c.name.as_str();
@@ -380,6 +380,15 @@ impl<'a> Index<'a> {
             v.truncate(1);
             v
         };
+        // `g.GET("/x", handler.list)` where `handler` holds a known class: that class's method
+        if !recv.is_empty() && !SELF.contains(&recv) {
+            if let Some(cls) = types.get(recv) {
+                let v = self.method(fam, cls, name, true);
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
         if recv.is_empty() {
             // a class handed over (`session.get(Item, id)`) runs nothing yet
             let v: Vec<Gid> = self.via_import(fi, name, 0).into_iter().filter(|g| self.def(*g).kind == Kind::Func).collect();
@@ -454,7 +463,7 @@ impl<'a> Index<'a> {
             v
         };
         if c.is_ref {
-            return (self.resolve_ref(fi, c, imported, folder), Conf::Near);
+            return (self.resolve_ref(fi, c, imported, folder, types), Conf::Near);
         }
         let owner = self.owner_of(fi, c.def);
         // 1. self.x() / this.x(): the class it is written in (and the classes that override it)
@@ -696,13 +705,13 @@ fn norm(s: &str) -> String {
 
 /// `x = Foo(...)`, `const x = new Foo()`, `self.x = Foo()`, `x := Foo{}` -> {x: Foo}, for classes of the repo.
 /// A name given two different classes says nothing.
-fn var_types(f: &File, ix: &Index, fam: &'static str) -> HashMap<String, String> {
+fn var_types(f: &File, ix: &Index, fam: &'static str, code: &str) -> HashMap<String, String> {
     static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?m)(?:^\s*|[;{(]\s*|\b(?:const|let|var|val|auto|my|local)\s+)((?:self\.|this\.|@|\$this->)?[A-Za-z_]\w*)\s*(?::\s*[\w.<>\[\]]+\s*)?:?=\s*(?:new\s+|&)?([A-Z]\w*)\s*[({]").unwrap()
+        Regex::new(r"(?m)(?:^\s*|[;{(]\s*|\b(?:const|let|var|val|auto|my|local)\s+)((?:self\.|this\.|@|\$this->)?[A-Za-z_]\w*)\s*(?::\s*[\w.<>\[\]]+\s*)?:?=\s*(?:new\s+|&)?([A-Za-z_]\w*)\s*[({]").unwrap()
     });
     let mut out: HashMap<String, String> = HashMap::new();
     let mut bad: HashSet<String> = HashSet::new();
-    for c in ASSIGN.captures_iter(&f.code) {
+    for c in ASSIGN.captures_iter(code) {
         let (v, cls) = (c[1].to_string(), &c[2]);
         if !ix.classes.contains_key(&(fam, cls)) {
             continue;
@@ -718,11 +727,12 @@ fn var_types(f: &File, ix: &Index, fam: &'static str) -> HashMap<String, String>
         Regex::new(r"\b([A-Za-z_]\w*)\s*\??:\s*(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|\*|Optional\[|Annotated\[|Option<|Box<|Arc<|Rc<)?([A-Z]\w*)\b").unwrap()
     });
     static TYPE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z]\w*)(?:<[^<>;(){}]*>)?\s+([a-z_]\w*)\s*[;=,)]").unwrap());
-    static GO_NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)\b([a-z_]\w*)\s+\*?([A-Z]\w*)\s*(?:[,)]|$)").unwrap());
-    let mut declared: Vec<(String, String)> = NAME_TYPE.captures_iter(&f.code).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+    // Go's unexported types are lowercase (`handler *placementHandler`); only names of classes of the repo count
+    static GO_NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)\b([a-z_]\w*)\s+\*?([A-Za-z_]\w*)\s*(?:[,)]|$)").unwrap());
+    let mut declared: Vec<(String, String)> = NAME_TYPE.captures_iter(code).map(|c| (c[1].to_string(), c[2].to_string())).collect();
     match f.lang.name {
-        "Go" => declared.extend(GO_NAME_TYPE.captures_iter(&f.code).map(|c| (c[1].to_string(), c[2].to_string()))),
-        "Java" | "C#" | "C++" | "Kotlin" | "Scala" | "PHP" => declared.extend(TYPE_NAME.captures_iter(&f.code).map(|c| (c[2].to_string(), c[1].to_string()))),
+        "Go" => declared.extend(GO_NAME_TYPE.captures_iter(code).map(|c| (c[1].to_string(), c[2].to_string()))),
+        "Java" | "C#" | "C++" | "Kotlin" | "Scala" | "PHP" => declared.extend(TYPE_NAME.captures_iter(code).map(|c| (c[2].to_string(), c[1].to_string()))),
         _ => {}
     }
     for (v, cls) in declared {
@@ -828,9 +838,19 @@ pub fn resolve_calls(files: &mut [File], libs: &HashMap<String, String>, scip: O
                 imported.remove(&fi);
                 let mut folder = if f.lang.scope != Scope::Imports { folders.get(&(fam, dirname(&f.path))).cloned().unwrap_or_default() } else { HashSet::new() };
                 folder.remove(&fi);
-                let types = var_types(f, &ix, fam);
+                let types = var_types(f, &ix, fam, &f.code);
+                // a name the whole file gives two classes (`handler` in three route functions) is told apart by the function it is in
+                let scoped: std::cell::RefCell<HashMap<usize, HashMap<String, String>>> = Default::default();
                 f.calls.iter().map(|c| {
-                    let ours = ix.resolve(fi, c, &imported, &folder, &types);
+                    let own = !c.recv.is_empty() && c.def > 0 && !types.contains_key(c.recv.as_str());
+                    if own && !scoped.borrow().contains_key(&c.def) {
+                        let d = &f.defs[c.def];
+                        let mut m = types.clone();
+                        m.extend(var_types(f, &ix, fam, f.code.get(d.start..d.end).unwrap_or("")));
+                        scoped.borrow_mut().insert(c.def, m);
+                    }
+                    let cache = scoped.borrow();
+                    let ours = ix.resolve(fi, c, &imported, &folder, if own { &cache[&c.def] } else { &types });
                     // the index knows better: what it names is used, and an outside library beats a guess from a name
                     match view.as_ref().and_then(|v| v.verdict(&ix, fi, c)) {
                         Some(Verdict::Defs(t)) => {
