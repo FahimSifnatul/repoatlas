@@ -51,6 +51,12 @@ pub fn stem(p: &str) -> &str {
     b.rsplit_once('.').map(|x| x.0).unwrap_or(b)
 }
 
+/// a file that is a screen whatever folder it sits in: markup in a script (.vue), JSX, or code that imports a UI library
+fn screen(f: &File) -> bool {
+    let jsx = f.lang.grammar.is_some_and(|g| g == "javascript" || g == "typescript") && (f.path.ends_with(".jsx") || f.path.ends_with(".tsx"));
+    f.lang.script_blocks || jsx || f.ext.iter().any(|(_, s)| cat_of(s) == Some("ui"))
+}
+
 pub fn classify(f: &File, fullstack: bool) -> Option<&'static str> {
     let parts: Vec<&str> = f.path.split('/').collect();
     let mut segs = vec![stem(&f.path)]; // file stem first, then folders deepest -> shallowest
@@ -76,7 +82,8 @@ pub fn classify(f: &File, fullstack: bool) -> Option<&'static str> {
                 if let Some((_, l)) = f.lang.stem_layers.iter().find(|(w, _)| w == t) {
                     return Some(l);
                 }
-                return Some(ly);
+                // a folder named like the front door (`router/`, `routes/`) holds a screen's routes as often as a server's
+                return Some(if *ly == "api" && screen(f) { "interface" } else { ly });
             }
         }
     }

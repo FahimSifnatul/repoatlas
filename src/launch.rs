@@ -563,19 +563,29 @@ fn spawned(files: &[File], find: &Finder, where_: &Where) -> Vec<Launch> {
                 None => regions.push((m.start(), f.code[m.end()..].find('\n').map(|n| m.end() + n).unwrap_or(f.code.len()))),
             }
         }
-        // strings inside them, and in the values of the names they use (CMDS[sys.argv[1]])
+        // strings inside them, and in the values of the names they use (CMDS[sys.argv[1]]); those values name more
+        // (`argv = split(cmd)`, `key, cmd = COMMANDS[role]`, `COMMANDS = {..}`): a few steps of that
         let mut spans: Vec<(usize, usize)> = regions.clone();
-        for &(a, b) in &regions {
-            for id in IDENT.find_iter(crate::text::slice(&f.code, a, b)) {
-                let name = id.as_str();
-                if name.len() < 2 {
-                    continue;
-                }
-                let assign = Regex::new(&format!(r"(?m)^[ \t]*(?:(?:const|let|var|local|readonly|export)\s+)?{}\s*(?::[^=\n]+)?(?::=|=)\s*", regex::escape(name))).unwrap();
-                for m in assign.find_iter(&f.bare) {
-                    spans.push((m.end(), value_end(&f.bare, m.end())));
+        let mut todo: Vec<(usize, usize)> = regions.clone();
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        for _ in 0..4 {
+            let mut next = vec![];
+            for &(a, b) in &todo {
+                for id in IDENT.find_iter(crate::text::slice(&f.code, a, b)) {
+                    let name = id.as_str();
+                    if name.len() < 2 || !named.insert(name.to_string()) {
+                        continue;
+                    }
+                    // the name may be one of several set at once: `key, cmd = ..`
+                    let assign = Regex::new(&format!(r"(?m)^[ \t]*(?:(?:const|let|var|local|readonly|export)\s+)?(?:[A-Za-z_]\w*\s*,\s*)*{}\s*(?:,\s*[A-Za-z_]\w*\s*)*(?::[^=\n]+)?(?::=|=)\s*", regex::escape(name))).unwrap();
+                    for m in assign.find_iter(&f.bare) {
+                        let span = (m.end(), value_end(&f.bare, m.end()));
+                        spans.push(span);
+                        next.push(span);
+                    }
                 }
             }
+            todo = next;
         }
         spans.sort();
         spans.dedup();

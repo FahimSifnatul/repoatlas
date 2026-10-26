@@ -108,11 +108,11 @@ pub fn reach(ctx: &Ctx, starts: &[Gid]) -> Reach {
     // per file, per definition: its calls (built when a file is first reached)
     let mut by_def: HashMap<usize, HashMap<usize, Vec<usize>>> = HashMap::new();
     let mut todo: VecDeque<Gid> = VecDeque::new();
-    // code that runs when a file loads: its top level, and for Go the whole package (var initializers, init())
+    // code that runs when a file loads: its top level, and where a package loads together (Lang.package_loads) all of its files
     let mut loaded: BTreeSet<usize> = BTreeSet::new();
-    let mut go_dirs: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (i, f) in ctx.files.iter().enumerate().filter(|(_, f)| f.lang.name == "Go") {
-        go_dirs.entry(dirname(&f.path)).or_default().push(i);
+    let mut package_dirs: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, f) in ctx.files.iter().enumerate().filter(|(_, f)| f.lang.package_loads) {
+        package_dirs.entry(dirname(&f.path)).or_default().push(i);
     }
     let mut does: HashMap<usize, bool> = HashMap::new();
     for &g in starts {
@@ -134,8 +134,8 @@ pub fn reach(ctx: &Ctx, starts: &[Gid]) -> Reach {
             if g.1 != 0 {
                 next.push((g.0, 0));
             }
-            if f.lang.name == "Go" {
-                for &q in go_dirs.get(dirname(&f.path)).into_iter().flatten() {
+            if f.lang.package_loads {
+                for &q in package_dirs.get(dirname(&f.path)).into_iter().flatten() {
                     next.push((q, 0));
                     next.extend(ctx.files[q].defs.iter().enumerate().filter(|(_, d)| d.kind == Kind::Func && d.owner.is_none() && d.name == "init").map(|(i, _)| (q, i)));
                 }
@@ -261,10 +261,10 @@ impl<'c, 'a> Walk<'c, 'a> {
         self.push(Step { file: g.0, def: Some(g.1), label: ctx.label(g), line: d.line, depth: 0, kind: "middleware", seen: None, more: 0, guess: false, when: "" });
     }
 
-    /// a file the framework loads by convention: one step, no calls
+    /// a file that loads without being called (the framework reads it by convention, its package loads): one step,
+    /// and what its top level runs beneath it (the closure in `Run: func() {..}` is part of the top level)
     pub fn loads(&mut self, file: usize) {
-        let label = basename(&self.ctx.files[file].path).to_string();
-        self.push(Step { file, def: Some(0), label, line: 1, depth: 0, kind: "loads", seen: None, more: 0, guess: false, when: "" });
+        self.visit((file, 0), 0, "loads", false, "");
     }
 }
 

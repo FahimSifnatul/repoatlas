@@ -61,6 +61,8 @@ pub struct Lang {
     pub implicit_this: bool,
     /// only the <script> blocks are code (Vue, Svelte)
     pub script_blocks: bool,
+    /// every file of a folder loads together: reaching one runs the top level of all (Go package variables and `init()`)
+    pub package_loads: bool,
 }
 
 const BASE: Lang = Lang {
@@ -82,6 +84,7 @@ const BASE: Lang = Lang {
     resolver: Resolver::None,
     implicit_this: false,
     script_blocks: false,
+    package_loads: false,
 };
 
 pub static LANGS: &[Lang] = &[
@@ -99,7 +102,7 @@ pub static LANGS: &[Lang] = &[
     Lang { name: "Svelte", exts: &[".svelte"], color: "#ff3e00", grammar: Some("javascript"), entry_by_name: false,
            default_layer: Some("interface"), scope: Scope::Imports, resolver: Resolver::Js, script_blocks: true, ..BASE },
     Lang { name: "Go", exts: &[".go"], color: "#00ADD8", manifests: &["go.mod"], grammar: Some("go"),
-           entry_re: &[r"(?m)^package\s+main\b", r"(?m)^func\s+main\s*\("], scope: Scope::Folder, resolver: Resolver::Go, ..BASE },
+           entry_re: &[r"(?m)^package\s+main\b", r"(?m)^func\s+main\s*\("], scope: Scope::Folder, resolver: Resolver::Go, package_loads: true, ..BASE },
     Lang { name: "Rust", exts: &[".rs"], color: "#b7603c", manifests: &["Cargo.toml"], grammar: Some("rust"),
            entry_re: &[r"(?m)^\s*fn\s+main\s*\("], scope: Scope::Imports, resolver: Resolver::Rust, ..BASE },
     Lang { name: "Java", exts: &[".java"], color: "#b07219", grammar: Some("java"),

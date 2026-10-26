@@ -5,13 +5,13 @@
 //! when the repo does not give one value for it.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::parse::File;
-use crate::rules::{mount_call, routes_file, GROUP_CALLS, INCLUDE, SCOPE_ARRAY, SCOPE_CALLS, SCOPE_CHAIN, SCOPE_FIRST_ARG};
+use crate::rules::{mount_call, routes_file, GROUP_CALLS, INCLUDE, PATTERN_PARTS, ROOT_LISTS, SCOPE_ARRAY, SCOPE_CALLS, SCOPE_CHAIN, SCOPE_FIRST_ARG};
 use crate::tables::STEM;
 
 /// (file, name of the router object in it); the name `*` stands for every router a file builds
@@ -37,6 +37,8 @@ pub struct Mounts {
     own: HashMap<Key, String>,
     edges: Vec<Edge>,
     scopes: Vec<Scope>,
+    /// per file: the lists of routes it writes, (start, end, name), the name of the list that is the file itself being ""
+    lists: HashMap<usize, Vec<(usize, usize, String)>>,
 }
 
 /// The arguments of the call that `text` starts with (`include_router(a, prefix="/x")`), split at top-level commas.
@@ -210,6 +212,39 @@ fn mount_parent(f: &File, c: &crate::parse::Call) -> Option<String> {
     head.trim_end().ends_with("export default").then(|| "default".to_string())
 }
 
+/// Where the bracket opened at `open` closes: the index after it, or the end of the text when it never does. Quoted text is skipped.
+fn close_of(text: &str, open: usize) -> usize {
+    let (mut depth, mut quote) = (0i32, None::<char>);
+    let mut chars = text[open..].char_indices();
+    while let Some((i, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == '\\' {
+                chars.next();
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open + i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    text.len()
+}
+
+/// A route pattern as the path people see: `^users/(?P<pk>\d+)/orders/?` -> users/{pk}/orders
+fn pattern_path(pattern: &str) -> String {
+    PATTERN_PARTS.iter().fold(pattern.to_string(), |p, (re, to)| re.replace_all(&p, *to).into_owned())
+}
+
 /// The one file a dotted module name (`shop.urls`) is, wherever the project root is.
 fn module_file(files: &[File], dotted: &str) -> Option<usize> {
     let stem = dotted.replace('.', "/");
@@ -230,6 +265,11 @@ pub fn build(files: &[File]) -> Mounts {
     let by_path: HashMap<&str, usize> = files.iter().enumerate().map(|(i, f)| (f.path.as_str(), i)).collect();
     let ev = Eval { files, consts: RefCell::new(HashMap::new()) };
     let mut m = Mounts::default();
+    // the objects routes are registered on: every name in `api.router.add_get(..)` may be the one a mount names
+    let routed: HashSet<Key> = files.iter().enumerate()
+        .flat_map(|(fi, f)| f.routes.iter().map(|r| r.recv.as_str()).chain(f.defs.iter().map(|d| d.route_on.as_str())).map(move |recv| (fi, recv)))
+        .flat_map(|(fi, recv)| recv.split('.').filter(|n| !n.is_empty()).map(move |n| (fi, n.to_string())))
+        .collect();
     for (fi, f) in files.iter().enumerate() {
         if f.lang.grammar.is_none() {
             continue;
@@ -255,8 +295,18 @@ pub fn build(files: &[File]) -> Mounts {
                 m.own.insert((fi, name), ev.eval(&path));
             }
         }
-        // one router mounted on another
-        for c in f.calls.iter().filter(|c| !c.is_ref && mount_call(f.lang.name, &c.name) && !c.recv.is_empty()) {
+        // one router mounted on another: by the calls that are known to, or any call that hands a router (an object that has
+        // routes registered on it) over under a path: `app.add_subapp("/api", api)`
+        let mounts_one = |c: &crate::parse::Call| -> bool {
+            if mount_call(f.lang.name, &c.name) {
+                return true;
+            }
+            let args = args_of(&f.bare[c.at..c.end.min(f.bare.len())]);
+            let (path, rest) = split_prefix(&args);
+            // the prefix is a URL path written out (not `":80"`, the address `ListenAndServe(":80", r)` serves on)
+            path.is_some_and(|p| is_literal(&p) && p.trim_start_matches(|c: char| "rRbBuUfF".contains(c)).trim_start_matches(['"', '\'', '`']).starts_with('/')) && rest.len() == 1 && child_key(f, fi, &by_path, &rest[0]).is_some_and(|k| routed.contains(&k))
+        };
+        for c in f.calls.iter().filter(|c| !c.is_ref && !c.recv.is_empty() && mounts_one(c)) {
             let args = open_options(f.lang.name, args_of(&f.bare[c.at..c.end.min(f.bare.len())]));
             let (path, rest) = split_prefix(&args);
             let Some(child) = rest.first().and_then(|a| child_key(f, fi, &by_path, a)) else { continue };
@@ -266,14 +316,50 @@ pub fn build(files: &[File]) -> Mounts {
                 m.edges.push(Edge { parent, child, path: path.map(|p| ev.eval(&p)).unwrap_or_default() });
             }
         }
-        // a routes file handed to another under a prefix: `path("api/", include("shop.urls"))`
+        // a routes file, or a list of routes, handed to another under a prefix: `path("api/", include("shop.urls"))`,
+        // `include((v1_patterns, "v1"))`, `include([path(..)])`
         if let Some(calls) = routes_file(&f.path) {
+            static LIST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^[ \t]*([A-Za-z_]\w*)\s*(?::[^=\n]+)?\+?=\s*\[").unwrap());
+            let mut lists: Vec<(usize, usize, String)> = LIST.captures_iter(&f.bare).map(|c| {
+                let open = c.get(0).unwrap().end() - 1;
+                let name = if ROOT_LISTS.contains(&&c[1]) { String::new() } else { c[1].to_string() };
+                (open, close_of(&f.bare, open), name)
+            }).collect();
+            // what each route call hands over: (the call, the pattern, what it includes)
+            let mut includes: Vec<(usize, String, String)> = vec![];
             for c in f.calls.iter().filter(|c| !c.is_ref && calls.contains(&c.name.as_str())) {
-                let args = args_of(&f.bare[c.at..c.end.min(f.bare.len())]);
-                let Some(module) = args.get(1).and_then(|a| INCLUDE.captures(a)) else { continue };
-                let (Some(child), Some(path)) = (module_file(files, &module[1]), args.first()) else { continue };
-                let path = ev.eval(path).trim_start_matches('^').trim_end_matches('$').to_string();
-                m.edges.push(Edge { parent: (fi, String::new()), child: (child, String::new()), path });
+                let end = c.end.min(f.bare.len());
+                let args = args_of(&f.bare[c.at..end]);
+                let (Some(pattern), Some(handler)) = (args.first(), args.get(1)) else { continue };
+                if !INCLUDE.is_match(handler) {
+                    continue;
+                }
+                let Some(first) = args_of(handler).into_iter().next() else { continue };
+                // `include((target, "namespace"))`: the target is the first of the pair
+                let target = if first.starts_with('(') { args_of(&format!("t{first}")).into_iter().next().unwrap_or_default() } else { first };
+                if target.starts_with('[') {
+                    // a list written in place: a router of its own, under this call
+                    if let Some(open) = f.bare[c.at..end].find("include").and_then(|i| f.bare[c.at + i..end].find('[').map(|j| c.at + i + j)) {
+                        lists.push((open, close_of(&f.bare, open), format!("@{open}")));
+                        includes.push((c.at, pattern.clone(), format!("@{open}")));
+                    }
+                } else {
+                    includes.push((c.at, pattern.clone(), target));
+                }
+            }
+            m.lists.insert(fi, lists);
+            for (at, pattern, target) in includes {
+                let child = if let Some(local) = target.strip_prefix('@') {
+                    Some((fi, format!("@{local}")))
+                } else if is_literal(&target) {
+                    module_file(files, target.trim_start_matches(|c: char| "rRbBuUfF".contains(c)).trim_matches(['"', '\''])).map(|i| (i, String::new()))
+                } else {
+                    // a list by name, written here or imported from another file
+                    child_key(f, fi, &by_path, &target).map(|(i, name)| (i, if ROOT_LISTS.contains(&name.as_str()) { String::new() } else { name }))
+                };
+                let Some(child) = child else { continue };
+                let path = pattern_path(ev.eval(&pattern).trim_start_matches('^'));
+                m.edges.push(Edge { parent: (fi, m.list_at(fi, at)), child, path });
             }
         }
         // routes written inside a closure that carries a prefix: `r.Route("/v1", func(r) {..})`, `Route::prefix('api')->group(function () {..})`
@@ -314,37 +400,61 @@ pub fn join_path(parts: &[&str]) -> String {
 }
 
 impl Mounts {
-    fn total(&self, key: &Key, depth: usize) -> String {
+    /// every prefix the router `key` is reached under (a router mounted in several places answers under each)
+    fn totals(&self, key: &Key, depth: usize) -> Vec<String> {
         let own = self.own.get(key).cloned().unwrap_or_default();
         if depth > 5 {
-            return own;
+            return vec![own];
         }
-        let edge = self.edges.iter().find(|e| e.child == *key)
-            .or_else(|| self.edges.iter().find(|e| !key.1.is_empty() && e.child.0 == key.0 && e.child.1 == "*" && e.parent != *key));
-        match edge {
-            Some(e) => {
-                let up = self.total(&e.parent, depth + 1);
-                join_path(&[&up, &e.path, &own])
+        let mut edges: Vec<&Edge> = self.edges.iter().filter(|e| e.child == *key).collect();
+        if edges.is_empty() {
+            edges.extend(self.edges.iter().find(|e| !key.1.is_empty() && e.child.0 == key.0 && e.child.1 == "*" && e.parent != *key));
+        }
+        if edges.is_empty() {
+            return vec![own];
+        }
+        let mut out: Vec<String> = vec![];
+        for e in edges {
+            for up in self.totals(&e.parent, depth + 1) {
+                let p = join_path(&[&up, &e.path, &own]);
+                if !out.contains(&p) {
+                    out.push(p);
+                }
             }
-            None => own,
         }
+        out.truncate(6);
+        out
     }
 
-    /// The prefix of every route registered on `recv` in file `fi` ("" when it is not mounted anywhere).
-    pub fn prefix(&self, fi: usize, recv: &str) -> String {
-        let var = recv.rsplit('.').next().unwrap_or(recv);
-        let p = self.total(&(fi, var.to_string()), 0);
-        if p == "/" { String::new() } else { p }
+    /// the list of routes the byte `at` of file `fi` is written in ("" for the file itself)
+    fn list_at(&self, fi: usize, at: usize) -> String {
+        let lists = self.lists.get(&fi).map(|v| v.as_slice()).unwrap_or(&[]);
+        lists.iter().filter(|(a, b, _)| *a <= at && at < *b).min_by_key(|(a, b, _)| b - a).map(|l| l.2.clone()).unwrap_or_default()
     }
 
-    /// `prefix`, then the prefixes of the closures the route at byte `at` is written in
-    pub fn prefix_at(&self, fi: usize, at: usize, recv: &str) -> String {
-        let up = self.prefix(fi, recv);
+    /// The prefixes of every route registered on `recv` in file `fi` at byte `at`: those of the router it is mounted on, then those
+    /// of the closures it is written in. One prefix per place the router is mounted; never empty ("" when it is mounted nowhere).
+    pub fn prefixes(&self, fi: usize, at: usize, recv: &str) -> Vec<String> {
+        // a route with no object (`path("x/", view)`) is on the list of routes it is written in
+        // (on `api.router` the name that is mounted is the one with a mount: the last name that has one)
+        let mounted = |n: &str| self.own.contains_key(&(fi, n.to_string())) || self.edges.iter().any(|e| e.child == (fi, n.to_string()));
+        let name = if recv.is_empty() {
+            self.list_at(fi, at)
+        } else {
+            recv.rsplit('.').find(|n| mounted(n)).unwrap_or_else(|| recv.rsplit('.').next().unwrap_or(recv)).to_string()
+        };
         let mut inner: Vec<&Scope> = self.scopes.iter().filter(|s| s.file == fi && s.from <= at && at < s.to).collect();
         inner.sort_by_key(|s| s.from);
-        let mut parts: Vec<&str> = vec![&up];
-        parts.extend(inner.iter().map(|s| s.path.as_str()));
-        let p = join_path(&parts);
-        if p == "/" { String::new() } else { p }
+        let mut out: Vec<String> = vec![];
+        for up in self.totals(&(fi, name), 0) {
+            let mut parts: Vec<&str> = vec![&up];
+            parts.extend(inner.iter().map(|s| s.path.as_str()));
+            let p = join_path(&parts);
+            let p = if p == "/" { String::new() } else { p };
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
     }
 }

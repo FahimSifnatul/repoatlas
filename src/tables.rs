@@ -225,6 +225,13 @@ pub fn io_order(key: &str) -> usize {
     IO.iter().position(|io| io.key == key).unwrap_or(usize::MAX)
 }
 
+/// `vue-router`, `react-select`: UI libraries name their add-ons after themselves, so an add-on is a UI library too
+/// (elsewhere the same shape says little: `flask-sqlalchemy` is a database layer, not a web framework)
+fn ui_addon(name: &str) -> Option<&'static str> {
+    let (base, _) = name.split_once('-')?;
+    EXT_CAT.get(base).copied().filter(|c| *c == "ui")
+}
+
 /// 'github.com/gin-gonic/gin/render' -> web; the longest known prefix decides
 pub fn cat_of(spec: &str) -> Option<&'static str> {
     let mut s = spec.to_lowercase();
@@ -235,10 +242,10 @@ pub fn cat_of(spec: &str) -> Option<&'static str> {
         let cut = match (s.rfind('.'), s.rfind('/')) {
             (Some(a), Some(b)) => a.max(b),
             (Some(a), None) | (None, Some(a)) => a,
-            _ => return None,
+            _ => return ui_addon(&s),
         };
         if cut == 0 {
-            return None;
+            return ui_addon(&s);
         }
         s.truncate(cut);
     }

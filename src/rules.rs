@@ -62,6 +62,19 @@ pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
     "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch", "at", "add_route", "add_api_route",
     "add_url_rule", "add_get", "add_post", "add_put", "add_delete", "add_patch", "Router"];
+/// calls that register a route, but only in files of one language: aiohttp `web.view("/orders", OrderView)`
+pub const LANG_ROUTE_CALLS: &[(&str, &str)] = &[("Python", "view")];
+/// calls that take the handler before the path: Sanic `app.add_route(handler, "/x", methods=["POST"])`
+pub const HANDLER_FIRST_CALLS: &[(&str, &str)] = &[("Python", "add_route")];
+
+/// whether a call of that name, in a file of that language, registers a route
+pub fn lang_route_call(lang: &str, name: &str) -> bool {
+    LANG_ROUTE_CALLS.iter().any(|(l, c)| *l == lang && *c == name)
+}
+/// whether a call of that name, in a file of that language, is written handler first
+pub fn handler_first_call(lang: &str, name: &str) -> bool {
+    HANDLER_FIRST_CALLS.iter().any(|(l, c)| *l == lang && *c == name)
+}
 /// call names that register a route only when called bare: `Route("/x", handler)` (a method called `Route` makes a group instead)
 pub const ROUTE_BARE: &[&str] = &["Route"];
 /// the keyword that carries the handler: `add_url_rule("/x", view_func=users)`
@@ -161,7 +174,7 @@ pub fn verb_method(lang: &str, name: &str) -> bool {
 }
 /// a path written as a regular expression, turned into the path people see: `^articles/(?P<slug>[-\w]+)/?$` -> articles/{slug}
 pub static PATTERN_PARTS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    vec![(rx(r"\(\?P<(\w+)>[^)]*\)"), "{$1}"), (rx(r"/\?\$$"), ""), (rx(r"\$$"), ""), (rx(r"^\^"), "")]
+    vec![(rx(r"\(\?P<(\w+)>[^)]*\)"), "{$1}"), (rx(r"/\?\$$"), ""), (rx(r"\$$"), ""), (rx(r"/\?$"), ""), (rx(r"^\^"), "")]
 });
 /// a handler wrapped in a call that names the verb: `get(list_items)`
 pub static HANDLER_WRAP: LazyLock<Regex> = LazyLock::new(|| rx(r"^(?P<wrap>\w+)\(\s*(?P<inner>[^()]+?)\s*\)$"));
@@ -231,16 +244,26 @@ pub fn file_route(lang: &str, path: &str) -> Option<(&'static FileRoute, String)
     })
 }
 
-/// the calls that register a route in this file, if it is a routes file
+/// the calls that register a route in this file, if it is a routes file. A name given whole (`urls.py`) is also a folder
+/// of files (`urls/v1.py`): a project that outgrows one file splits it
 pub fn routes_file(path: &str) -> Option<&'static [&'static str]> {
     ROUTE_FILES
         .iter()
-        .find(|(dir, ending, _)| path.ends_with(ending) && (dir.is_empty() || path.starts_with(dir) || path.contains(&format!("/{dir}"))))
+        .find(|(dir, ending, _)| {
+            let held = dir.is_empty() || path.starts_with(dir) || path.contains(&format!("/{dir}"));
+            let folder = ending.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(stem, ext)| (format!("{stem}/"), format!(".{ext}")));
+            held && (path.ends_with(ending)
+                || folder.is_some_and(|(f, ext)| path.ends_with(&ext) && (path.starts_with(&f) || path.contains(&format!("/{f}")))))
+        })
         .map(|(_, _, calls)| *calls)
 }
 
-/// a routes file handed to another routes file under a prefix: `path("api/", include("shop.urls"))`
-pub static INCLUDE: LazyLock<Regex> = LazyLock::new(|| rx(r#"^include\(\s*['"]([\w.]+)['"]"#));
+/// a routes file, or a list of routes, handed to another under a prefix: `path("api/", include("shop.urls"))`,
+/// `include(("shop.urls", "ns"))`, `include(v1_patterns)`, `include([path(..), ..])`
+pub static INCLUDE: LazyLock<Regex> = LazyLock::new(|| rx(r"^include\("));
+/// the names a routes file gives the list that is the file itself, where the rest of the project includes it from: the other lists
+/// of the file are routers of their own, included by name
+pub const ROOT_LISTS: &[&str] = &["urlpatterns"];
 
 /// calls whose closure argument registers routes under a prefix, and where that prefix is written:
 /// first argument `r.Route("/v1", func(..) {..})`, the chain before it `Route::prefix('api')->group(..)`, an array `['prefix' => 'api']`

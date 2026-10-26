@@ -117,6 +117,8 @@ struct Index<'a> {
     modfiles: HashMap<(&'static str, String), Vec<usize>>,
     /// crate name -> its lib.rs
     crates: HashMap<&'a str, usize>,
+    /// (family, folder) -> its files, for languages whose import is a whole folder
+    folders: HashMap<(&'static str, &'a str), Vec<usize>>,
     /// file -> the files it reaches through what it imports (built on first use)
     reach: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
 }
@@ -135,9 +137,13 @@ impl<'a> Index<'a> {
             modfiles.entry((family(f.lang), last)).or_default().push(i);
         }
         let crates = libs.iter().filter_map(|(n, p)| by_path.get(p.as_str()).map(|&i| (n.as_str(), i))).collect();
+        let mut folders: HashMap<(&'static str, &str), Vec<usize>> = HashMap::new();
+        for (i, f) in files.iter().enumerate().filter(|(_, f)| f.lang.scope == Scope::Folder) {
+            folders.entry((family(f.lang), dirname(&f.path))).or_default().push(i);
+        }
         let mut ix = Index {
             files, by_path, top: HashMap::new(), methods: HashMap::new(), any_method: HashMap::new(), classes: HashMap::new(),
-            subclasses: HashMap::new(), reach: Default::default(), lower: HashMap::new(), modpath, modfiles, crates,
+            subclasses: HashMap::new(), reach: Default::default(), lower: HashMap::new(), modpath, modfiles, crates, folders,
         };
         for (fi, f) in files.iter().enumerate() {
             let fam = family(f.lang);
@@ -163,7 +169,7 @@ impl<'a> Index<'a> {
         ix
     }
 
-    /// the files `fi` can see: itself and everything its imports lead to
+    /// the files `fi` can see: itself and everything its imports lead to (an import of a folder is all of its files)
     fn reaches(&self, fi: usize) -> std::rc::Rc<HashSet<usize>> {
         if let Some(r) = self.reach.borrow().get(&fi) {
             return r.clone();
@@ -172,9 +178,11 @@ impl<'a> Index<'a> {
         let mut todo = vec![fi];
         while let Some(i) = todo.pop() {
             for u in &self.files[i].uses {
-                if let Some(&j) = self.by_path.get(u.as_str()) {
-                    if seen.insert(j) {
-                        todo.push(j);
+                let Some(&j) = self.by_path.get(u.as_str()) else { continue };
+                let same = self.folders.get(&(family(self.files[j].lang), dirname(&self.files[j].path)));
+                for k in same.map(|v| v.as_slice()).unwrap_or(&[]).iter().copied().chain([j]) {
+                    if seen.insert(k) {
+                        todo.push(k);
                     }
                 }
             }
@@ -253,6 +261,33 @@ impl<'a> Index<'a> {
         out.dedup();
         out.truncate(6);
         out
+    }
+
+    /// what stands in for a type with no methods of its own (an interface, a protocol, an abstract class) when `name` is called on it:
+    /// the classes built on it that define `name`, else the classes written next to it (same file, then same folder) that do
+    fn implementors(&self, fam: &'static str, ty: &str, name: &str, fi: usize) -> Vec<Gid> {
+        let built: Vec<Gid> = self.subclasses.get(&(fam, ty)).into_iter().flatten().flat_map(|k| self.methods.get(&(fam, *k, name)).into_iter().flatten().copied()).collect();
+        if !built.is_empty() {
+            return built;
+        }
+        let homes: Vec<usize> = self.classes.get(&(fam, ty)).into_iter().flatten().map(|g| g.0).collect();
+        let near = |g: &Gid| -> u8 {
+            if homes.contains(&g.0) {
+                0
+            } else if homes.iter().any(|&h| dirname(&self.files[h].path) == dirname(&self.files[g.0].path)) {
+                1
+            } else {
+                2
+            }
+        };
+        let mut v: Vec<Gid> = self.any_method.get(&(fam, name)).into_iter().flatten().copied()
+            .filter(|g| self.live(*g, fi) && self.def(*g).owner.as_deref() != Some(ty) && near(g) < 2).collect();
+        let best = v.iter().map(near).min();
+        v.retain(|g| Some(near(g)) == best);
+        v.sort();
+        v.dedup();
+        v.truncate(6);
+        v
     }
 
     /// top-level definitions called `name` in the given files (a function nested in another counts only in its own file)
@@ -384,6 +419,10 @@ impl<'a> Index<'a> {
         if !recv.is_empty() && !SELF.contains(&recv) {
             if let Some(cls) = types.get(recv) {
                 let v = self.method(fam, cls, name, true);
+                if !v.is_empty() {
+                    return v;
+                }
+                let v = self.implementors(fam, cls, name, fi);
                 if !v.is_empty() {
                     return v;
                 }
@@ -567,6 +606,10 @@ impl<'a> Index<'a> {
             if !v.is_empty() {
                 return (v, Conf::Near);
             }
+            let v = self.implementors(fam, cls, name, fi);
+            if !v.is_empty() {
+                return (v, Conf::Near);
+            }
         }
         // 10. x.y() on an object of unknown type: the method of that name, or "one of N" when several classes have it
         let word = receiver_word(recv).replace('_', "");
@@ -585,7 +628,7 @@ impl<'a> Index<'a> {
         }
         // only classes the file can see through its imports: `tmp.path()` is not some other module's path()
         let seen = self.reaches(fi);
-        let v: Vec<Gid> = self.any_method.get(&(fam, name)).into_iter().flatten().copied().filter(|g| seen.contains(&g.0) && self.live(*g, fi)).collect();
+        let v: Vec<Gid> = self.any_method.get(&(fam, name)).into_iter().flatten().copied().filter(|g| seen.contains(&g.0) && self.live(*g, fi) && *g != (fi, c.def)).collect();
         if !(1..=6).contains(&v.len()) {
             return (vec![], Conf::Guess);
         }
@@ -727,8 +770,9 @@ fn var_types(f: &File, ix: &Index, fam: &'static str, code: &str) -> HashMap<Str
         Regex::new(r"\b([A-Za-z_]\w*)\s*\??:\s*(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|\*|Optional\[|Annotated\[|Option<|Box<|Arc<|Rc<)?([A-Z]\w*)\b").unwrap()
     });
     static TYPE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z]\w*)(?:<[^<>;(){}]*>)?\s+([a-z_]\w*)\s*[;=,)]").unwrap());
-    // Go's unexported types are lowercase (`handler *placementHandler`); only names of classes of the repo count
-    static GO_NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)\b([a-z_]\w*)\s+\*?([A-Za-z_]\w*)\s*(?:[,)]|$)").unwrap());
+    // Go writes the type after the name, in any case, with the package it comes from (`handler *placementHandler`,
+    // `Usecase usecase.PlacementUsecase`); only names of classes of the repo count
+    static GO_NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)\b([A-Za-z_]\w*)\s+\*?(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*(?:[,)]|$)").unwrap());
     let mut declared: Vec<(String, String)> = NAME_TYPE.captures_iter(code).map(|c| (c[1].to_string(), c[2].to_string())).collect();
     match f.lang.name {
         "Go" => declared.extend(GO_NAME_TYPE.captures_iter(code).map(|c| (c[1].to_string(), c[2].to_string()))),

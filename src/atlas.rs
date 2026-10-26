@@ -349,7 +349,10 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
         for P in &procs {
             // a routes file is read by a program written in its own language, not by any program next to it
             let same_language = !framework_read(&files[ix[m]]) || graph::family(files[ix[&P.starts[0]]].lang) == graph::family(files[ix[m]].lang);
-            if same_language && home(&P.starts[0]) == home(m) {
+            // a program that runs the worker of a job queue answers jobs, not web requests: it does not read the routes
+            let works_queue = std::iter::once(&P.cmd).chain(P.chain.iter().map(|c| &c.cmd))
+                .any(|cmd| words(cmd).iter().any(|w| cat_of(basename(w)) == Some("queue")));
+            if same_language && !(works_queue && framework_read(&files[ix[m]])) && home(&P.starts[0]) == home(m) {
                 files[ix[&P.starts[0]]].uses.push(m.clone());
                 conv.insert((P.starts[0].clone(), m.clone()));
             }
@@ -729,7 +732,15 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             // files the framework loads for a package the journey passes through
             let in_steps: HashSet<usize> = walk.steps.iter().map(|s| s.file).collect();
             let near: HashSet<&str> = in_steps.iter().flat_map(|&i| std::iter::once(files[i].path.as_str()).chain(files[i].uses.iter().map(|u| u.as_str()))).collect();
-            let loaded: Vec<usize> = conv.iter().filter(|(a, m)| near.contains(a.as_str()) && !in_steps.contains(&ix[m])).map(|(_, m)| ix[m]).collect::<BTreeSet<_>>().into_iter().take(12).collect();
+            let mut loaded: BTreeSet<usize> = conv.iter().filter(|(a, m)| near.contains(a.as_str()) && !in_steps.contains(&ix[m])).map(|(_, m)| ix[m]).collect();
+            // files that load together with a package the journey passes through, and run something when they do
+            let package_dirs: HashSet<(&str, &str)> = in_steps.iter().map(|&i| &files[i]).filter(|f| f.lang.package_loads).map(|f| (f.lang.name, dirname(&f.path))).collect();
+            loaded.extend((0..files.len()).filter(|&q| {
+                let f = &files[q];
+                f.lang.package_loads && f.layer != Some("tests") && !in_steps.contains(&q) && package_dirs.contains(&(f.lang.name, dirname(&f.path)))
+                    && f.calls.iter().enumerate().any(|(ci, c)| c.def == 0 && !targets[q][ci].is_empty())
+            }));
+            let loaded: Vec<usize> = loaded.into_iter().take(12).collect();
             reached_files.extend(loaded.iter().map(|&m| files[m].path.clone()));
             for m in loaded {
                 walk.loads(m);
@@ -745,14 +756,18 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                 let f = &files[fi];
                 let mut found: Vec<(String, String, usize, Vec<Gid>, Vec<Gid>, bool)> = vec![];
                 // the full path: the prefixes of the routers it is mounted under, the class it is written in, then its own
-                let full = |recv: &str, at: usize, class: &str, path: &str| -> String {
-                    let up = mounts.prefix_at(fi, at, recv);
-                    if up.is_empty() && class.is_empty() { path.to_string() } else { crate::mounts::join_path(&[&up, class, path]) }
+                // (a router mounted in several places answers under each)
+                let full = |recv: &str, at: usize, class: &str, path: &str| -> Vec<String> {
+                    mounts.prefixes(fi, at, recv).into_iter()
+                        .map(|up| if up.is_empty() && class.is_empty() { path.to_string() } else { crate::mounts::join_path(&[&up, class, path]) })
+                        .collect()
                 };
                 for (di, d) in f.defs.iter().enumerate().filter(|(_, d)| d.kind == Kind::Func) {
                     if let Some((verb, path)) = &d.route {
                         let class = d.parent.map(|p| f.defs[p].prefix.as_str()).unwrap_or("");
-                        found.push((verb.clone(), full(&d.route_on, d.start, class, path), d.line, vec![(fi, di)], vec![], false));
+                        for path in full(&d.route_on, d.start, class, path) {
+                            found.push((verb.clone(), path, d.line, vec![(fi, di)], vec![], false));
+                        }
                     }
                 }
                 for r in &f.routes {
@@ -874,17 +889,20 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                                 }
                             }
                         }
-                        let path = full(&r.recv, r.at, "", &r.path);
                         let split = !by_verb.is_empty();
-                        for (v, ms) in by_verb {
-                            found.push((v, path.clone(), r.line, ms, pre.clone(), guess));
-                        }
-                        if !split || !hs.is_empty() {
-                            found.push((verb, path, r.line, hs, pre, guess));
+                        for path in full(&r.recv, r.at, "", &r.path) {
+                            for (v, ms) in &by_verb {
+                                found.push((v.clone(), path.clone(), r.line, ms.clone(), pre.clone(), guess));
+                            }
+                            if !split || !hs.is_empty() {
+                                found.push((verb.clone(), path, r.line, hs.clone(), pre.clone(), guess));
+                            }
                         }
                         continue;
                     }
-                    found.push((verb, full(&r.recv, r.at, "", &r.path), r.line, hs, pre, guess));
+                    for path in full(&r.recv, r.at, "", &r.path) {
+                        found.push((verb.clone(), path, r.line, hs.clone(), pre.clone(), guess));
+                    }
                 }
                 for (verb, path, line, hs, pre, guess) in found {
                     // the map covers every endpoint, though the list below it stops at MAX_ROUTES

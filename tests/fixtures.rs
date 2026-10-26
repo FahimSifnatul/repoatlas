@@ -2242,3 +2242,165 @@ fn a_controller_named_in_a_string() {
     assert!(r.contains(&"GET /articles".to_string()), "{r:?}");
     assert_eq!(route_first(&d, "/articles").as_deref(), Some("ArticleController.index()"));
 }
+
+// ---------------------------------------------------------------- calls through typed fields and interfaces
+
+/// the names of every step of the first route
+fn route_step_names(d: &Value) -> Vec<String> {
+    procs(d)[0]["routes"][0]["steps"].as_array().unwrap().iter().map(|s| s["n"].as_str().unwrap().to_string()).collect()
+}
+
+/// a Go file of many lines with nothing the tests call
+fn big_go_file(pkg: &str) -> String {
+    let fns: String = (0..40).map(|i| format!("func helper{i}() int {{\n\treturn {i}\n}}\n")).collect();
+    format!("package {pkg}\n\n{fns}")
+}
+
+#[test]
+fn calls_through_an_interface_field_reach_the_implementation() {
+    // handler -> usecase -> repository, each package of two files, each layer a field typed by an interface of the next package
+    let d = analyze(&[
+        ("go.mod", "module shop\n"),
+        ("main.go", "package main\n\nimport (\n\t\"github.com/labstack/echo/v4\"\n\t\"shop/app/delivery\"\n)\n\nfunc main() {\n\te := echo.New()\n\tdelivery.NewHandler(e, nil)\n\te.Start(\":80\")\n}\n"),
+        ("app/delivery/handler.go", "package delivery\n\nimport (\n\t\"shop/app/usecase\"\n\n\t\"github.com/labstack/echo/v4\"\n)\n\ntype handler struct {\n\tUsecase usecase.PlacementUsecase\n}\n\nfunc NewHandler(e *echo.Echo, us usecase.PlacementUsecase) {\n\th := &handler{Usecase: us}\n\te.GET(\"/placements\", h.list)\n}\n\nfunc (h *handler) list(c echo.Context) error {\n\tres, err := h.Usecase.ListPlacement(c)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn c.JSON(200, res)\n}\n"),
+        ("app/usecase/placement.go", "package usecase\n\nimport \"shop/app/repository\"\n\ntype PlacementUsecase interface {\n\tListPlacement(c interface{}) ([]string, error)\n}\n\ntype placementUsecase struct {\n\tplacementRepo repository.PlacementRepository\n}\n\nfunc NewPlacementUsecase(r repository.PlacementRepository) PlacementUsecase {\n\treturn &placementUsecase{placementRepo: r}\n}\n\nfunc (p placementUsecase) ListPlacement(c interface{}) ([]string, error) {\n\treturn p.placementRepo.ListPlacements(c)\n}\n"),
+        // the biggest file of a package is the one an import resolves to: the usecase sits in a smaller file next to it
+        ("app/usecase/a_utils.go", big_go_file("usecase").as_str()),
+        ("app/repository/placement.go", "package repository\n\ntype PlacementRepository interface {\n\tListPlacements(c interface{}) ([]string, error)\n}\n\ntype placementRepo struct{}\n\nfunc (r *placementRepo) ListPlacements(c interface{}) ([]string, error) {\n\treturn nil, nil\n}\n"),
+        ("app/repository/a_other.go", big_go_file("repository").as_str()),
+    ]);
+    let names = route_step_names(&d);
+    assert!(names.contains(&"placementUsecase.ListPlacement()".to_string()), "{names:?}");
+    assert!(names.contains(&"placementRepo.ListPlacements()".to_string()), "{names:?}");
+}
+
+#[test]
+fn a_method_of_the_same_name_on_the_caller_is_not_a_recursion() {
+    // the handler and the usecase both have `Get`: the handler's call goes to the usecase, not back to itself
+    let d = analyze(&[
+        ("go.mod", "module shop\n"),
+        ("main.go", "package main\n\nimport (\n\t\"github.com/labstack/echo/v4\"\n\t\"shop/app/delivery\"\n)\n\nfunc main() {\n\te := echo.New()\n\tdelivery.NewHandler(e, nil)\n\te.Start(\":80\")\n}\n"),
+        ("app/delivery/handler.go", "package delivery\n\nimport (\n\t\"shop/app/usecase\"\n\n\t\"github.com/labstack/echo/v4\"\n)\n\ntype Handler struct {\n\tus usecase.Usecase\n}\n\nfunc NewHandler(e *echo.Echo, us usecase.Usecase) {\n\th := &Handler{us: us}\n\te.GET(\"/x\", h.Get)\n}\n\nfunc (h *Handler) Get(c echo.Context) error {\n\treturn h.us.Get(c)\n}\n"),
+        ("app/usecase/usecase.go", "package usecase\n\ntype Usecase interface {\n\tGet(c interface{}) error\n}\n\ntype impl struct{}\n\nfunc (i impl) Get(c interface{}) error { return nil }\n"),
+    ]);
+    let names = route_step_names(&d);
+    assert!(names.contains(&"impl.Get()".to_string()), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("recursion") || n.contains("one of")), "{names:?}");
+}
+
+// ---------------------------------------------------------------- code that runs when a file loads
+
+#[test]
+fn a_closure_held_in_a_value_built_at_load_time_is_followed() {
+    // `Run: func() { server.Serve() }` sits in a package-level value no function calls: the code that parses the
+    // arguments calls it later. The file is loaded with its package, and what the closure calls shows beneath it.
+    let d = analyze(&[
+        ("go.mod", "module shop\n"),
+        ("main.go", "package main\n\nimport \"shop/cmd\"\n\nfunc main() {\n\tcmd.Execute()\n}\n"),
+        ("cmd/root.go", "package cmd\n\ntype Command struct {\n\tRun func()\n}\n\nvar root = &Command{}\n\nfunc Execute() {\n\troot.Run()\n}\n"),
+        ("cmd/serve.go", "package cmd\n\nimport \"shop/server\"\n\nvar serve = &Command{\n\tRun: func() {\n\t\tserver.Serve()\n\t},\n}\n"),
+        ("server/server.go", "package server\n\nfunc Serve() {}\n"),
+    ]);
+    let got = steps(&procs(&d)[0]);
+    let at = |n: &str| got.iter().position(|s| s.2 == n);
+    let (load, serve) = (at("serve.go"), at("Serve()"));
+    assert!(load.is_some() && serve.is_some(), "{got:?}");
+    assert!(got[serve.unwrap()].0 > got[load.unwrap()].0, "Serve() is under the file that holds the closure: {got:?}");
+}
+
+#[test]
+fn an_entrypoint_that_reaches_its_command_through_several_names() {
+    // the command goes dict -> tuple unpacked in a function -> split into a list -> exec'd: each name leads to the next
+    let d = analyze(&[
+        ("Dockerfile", "FROM python\nWORKDIR /app\nCOPY start.py /app/entrypoint\nCOPY ./code /app/code\nENTRYPOINT [\"/app/entrypoint\"]\n"),
+        ("start.py", "import os, shlex, sys\n\nCOMMANDS = {\n    \"server\": (\"SERVER_CMD\", \"gunicorn proj.wsgi --bind 0.0.0.0:8000\"),\n    \"worker\": (\"WORKER_CMD\", \"celery -A proj worker\"),\n}\n\n\ndef main():\n    role = sys.argv[1]\n    key, default_cmd = COMMANDS[role]\n    argv = shlex.split(os.environ.get(key) or default_cmd)\n    os.chdir(\"/app/code\")\n    os.execvp(argv[0], argv)\n\n\nif __name__ == \"__main__\":\n    main()\n"),
+        ("code/proj/__init__.py", "from .tasks import app\n"),
+        ("code/proj/tasks.py", "app = None\n"),
+        ("code/proj/wsgi.py", "import os\nos.environ.setdefault(\"SETTINGS\", \"proj.settings\")\n"),
+    ]);
+    assert_eq!(sorted(proc_names(&d)), ["server", "worker"]);
+    assert_eq!(strs(&proc_named(&d, "server")["entries"]), ["code/proj/wsgi.py"]);
+    assert_eq!(strs(&proc_named(&d, "server")["chain"]), ["start.py"]);
+}
+
+// ---------------------------------------------------------------- route trees
+
+#[test]
+fn a_urls_package_and_the_ways_to_include_a_list_of_routes() {
+    // an `urls/` folder is a routes file; an include names a module in a tuple, a list by its name (also one imported from
+    // another file) or a list written in place; one list mounted twice answers under both prefixes
+    let d = analyze(&[
+        ("manage.py", "import config.urls\n\nif __name__ == '__main__':\n    config.urls\n"),
+        ("config/__init__.py", ""),
+        ("config/urls.py", concat!(
+            "from django.urls import include, re_path\n\nfrom shop.urls.v1 import internal_patterns\n\n",
+            "v1_patterns = [\n",
+            "    re_path(r\"^\", include(\"shop.urls.general\")),\n",
+            "    re_path(r\"^users/(?P<pk>[\\w\\d\\-]+)/orders/?\", include((\"shop.urls.orders\", \"orders\"), namespace=\"orders\")),\n",
+            "    re_path(r\"^internal/\", include((internal_patterns, \"internal\"), namespace=\"internal\")),\n",
+            "]\n\n",
+            "urlpatterns = [\n",
+            "    re_path(r\"^\", include(v1_patterns)),\n",
+            "    re_path(\n        r\"^api/\",\n        include(\n            [\n                re_path(r\"^v1/\", include((v1_patterns, \"v1\"), namespace=\"v1\")),\n            ]\n        ),\n    ),\n",
+            "]\n")),
+        ("shop/__init__.py", ""),
+        ("shop/urls/__init__.py", ""),
+        ("shop/urls/general.py", "from django.urls import re_path\nfrom shop.views import Health\n\nurlpatterns = [re_path(r\"^health$\", Health.as_view())]\n"),
+        ("shop/urls/orders.py", "from django.urls import re_path\nfrom shop.views import Receipt\n\nurlpatterns = [re_path(r\"^(?P<order>[\\w\\d\\-]+)/receipt$\", Receipt.as_view())]\n"),
+        ("shop/urls/v1.py", "from django.urls import re_path\nfrom shop.views import Sync\n\ninternal_patterns = [re_path(r\"^sync$\", Sync.as_view())]\n"),
+        ("shop/views.py", "class Health:\n    def get(self, request):\n        return 1\n\nclass Receipt:\n    def get(self, request, order):\n        return 1\n\nclass Sync:\n    def post(self, request):\n        return 1\n"),
+    ]);
+    let got = route_paths(&procs(&d)[0]);
+    let want = ["ANY /api/v1/health", "ANY /api/v1/internal/sync", "ANY /api/v1/users/{pk}/orders/{order}/receipt", "ANY /health",
+        "ANY /internal/sync", "ANY /users/{pk}/orders/{order}/receipt"]; // a class view picks its verb when it runs
+    assert_eq!(got, want);
+}
+
+// ---------------------------------------------------------------- screens in folders named like the front door
+
+#[test]
+fn a_screen_in_a_router_or_routes_folder_is_interface() {
+    let d = analyze(&[
+        ("src/router/index.js", "import { createRouter } from 'vue-router'\nimport Users from '../views/Users.vue'\n\nexport default createRouter({ routes: [{ path: '/users', component: Users }] })\n"),
+        ("src/routes/Users.jsx", "import React from 'react'\n\nexport default function Users() {\n  return <ul/>\n}\n"),
+        ("src/views/Users.vue", "<template><ul/></template>\n<script>\nexport default { name: 'Users' }\n</script>\n"),
+        ("src/routes/orders.js", "const express = require('express')\nconst router = express.Router()\nrouter.get('/orders', (req, res) => res.json([]))\nmodule.exports = router\n"),
+        ("pages/api/users.ts", "export default function handler(req, res) {\n  res.json([])\n}\n"),
+    ]);
+    let layer = |p: &str| d["nodes"][p]["layer"].as_str().unwrap_or("").to_string();
+    assert_eq!(layer("src/router/index.js"), "interface"); // imports a UI library
+    assert_eq!(layer("src/routes/Users.jsx"), "interface"); // markup
+    assert_eq!(layer("src/routes/orders.js"), "api"); // a server's routes stay the front door
+    assert_eq!(layer("pages/api/users.ts"), "api");
+}
+
+// ---------------------------------------------------------------- route calls read by the shape of their arguments
+
+#[test]
+fn python_handler_first_route_calls() {
+    // the path need not come first: `add_route(handler, "/x", methods=[..])`; a class handed over under a path answers with its verbs
+    let d = py_routes("from sanic import Sanic\nfrom sanic.views import HTTPMethodView\n\napp = Sanic(\"shop\")\n\nclass ItemView(HTTPMethodView):\n    async def get(self, request):\n        return 1\n\n    async def post(self, request):\n        return 1\n\nasync def legacy(request):\n    return 1\n\nasync def health(request):\n    return 1\n\napp.add_route(ItemView.as_view(), \"/items\")\napp.add_route(legacy, \"/legacy\", methods=[\"POST\"])\napp.add_route(health, \"/health\")\n\nif __name__ == \"__main__\":\n    app.run()\n");
+    assert_eq!(route_lines(&d), ["ANY /health health()", "ANY /items ItemView.get(), ItemView.post()", "POST /legacy legacy()"]);
+}
+
+#[test]
+fn python_class_view_and_sub_application_routes() {
+    // a class under a path, and an application mounted under a prefix whose routes are added on its router
+    let d = py_routes("from aiohttp import web\n\nclass OrderView(web.View):\n    async def get(self):\n        return web.json_response([])\n\nasync def health(request):\n    return web.json_response({})\n\napp = web.Application()\napp.add_routes([web.view(\"/orders\", OrderView)])\napi = web.Application()\napi.router.add_post(\"/v1\", health)\napp.add_subapp(\"/api\", api)\n\nif __name__ == \"__main__\":\n    web.run_app(app)\n");
+    assert_eq!(route_lines(&d), ["GET /orders OrderView.get()", "POST /api/v1 health()"]);
+}
+
+#[test]
+fn a_job_queue_worker_does_not_read_the_routes() {
+    // the web program and the worker of a job queue sit in one project: only the first answers requests
+    let d = analyze(&[
+        ("docker-compose.yml", "services:\n  web:\n    command: python manage.py runserver\n  worker:\n    command: celery -A proj worker\n"),
+        ("manage.py", "import sys\n\nif __name__ == '__main__':\n    print(sys.argv)\n"),
+        ("proj/__init__.py", "from .tasks import app\n"),
+        ("proj/tasks.py", "app = None\n"),
+        ("proj/urls.py", "from django.urls import path\nfrom proj import views\n\nurlpatterns = [path('items/', views.items)]\n"),
+        ("proj/views.py", "def items(request):\n    return 1\n"),
+    ]);
+    let routes = |name: &str| proc_named(&d, name)["routes"].as_array().unwrap().len();
+    assert_eq!((routes("web"), routes("worker")), (1, 0));
+}

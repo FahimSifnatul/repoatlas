@@ -323,14 +323,19 @@ fn signature(text: &str, name_end: usize, strip_self: bool) -> String {
     format!("({s})")
 }
 
-/// Names after a class's own name: `class A(Base)`, `extends B implements C`, `: Base()`, `< Bar`
+/// Names after a class's own name: `class A(Base)`, `extends B implements C`, `: Base()`, `< Bar`.
+/// Where the head holds the field list too (Go `struct { Base; name string }`), only a field that is a lone type is a base:
+/// it embeds that type. A field with a name (`us usecase.Usecase`) only holds a value.
 fn bases_of(head: &str) -> Vec<String> {
     static IDENT: LazyLock<Regex> = LazyLock::new(|| rx(r"[A-Za-z_][\w.:]*"));
+    static EMBEDDED: LazyLock<Regex> = LazyLock::new(|| rx(r"^\*?[A-Za-z_][\w.]*$"));
     const SKIP: &[&str] = &["extends", "implements", "public", "private", "protected", "internal", "final", "abstract", "class",
         "struct", "where", "with", "open", "sealed", "data", "object", "metaclass", "virtual", "for", "impl", "new"];
+    let (head, fields) = head.split_once('{').unwrap_or((head, ""));
+    let embedded = fields.lines().map(|l| l.trim().trim_end_matches([';', ',']).trim().trim_start_matches('*')).filter(|l| EMBEDDED.is_match(l));
     let mut out: Vec<String> = vec![];
-    for m in IDENT.find_iter(head) {
-        let last = m.as_str().rsplit(['.', ':']).next().unwrap_or("").to_string();
+    for m in IDENT.find_iter(head).map(|m| m.as_str()).chain(embedded) {
+        let last = m.rsplit(['.', ':']).next().unwrap_or("").to_string();
         if !last.is_empty() && !SKIP.contains(&last.as_str()) && !out.contains(&last) {
             out.push(last);
         }
@@ -409,24 +414,39 @@ fn head_of(node: Node) -> usize {
     start
 }
 
-fn decorator_route(head: &str) -> Option<(String, String)> {
+/// The verbs a route names for itself: `methods=["GET", "POST"]`, `method: 'put'` -> GET|POST
+fn methods_of(text: &str) -> Option<String> {
     static METHODS: LazyLock<Regex> = LazyLock::new(|| rx(r"methods?\s*[=:]\s*[\[(]?([^\])\n]*)"));
+    let m = METHODS.captures(text)?;
+    let vs: Vec<String> = m[1].split(',').map(|v| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty()).collect();
+    (!vs.is_empty()).then(|| vs.join("|"))
+}
+
+fn decorator_route(head: &str) -> Option<(String, String)> {
     for re in DECORATOR_ROUTES.iter() {
         if let Some(c) = re.captures(head) {
             let mut verb = c[1].to_uppercase();
             if verb == "ROUTE" || verb == "REQUEST" {
-                verb = "ANY".into();
-                if let Some(m) = METHODS.captures(head) {
-                    let vs: Vec<String> = m[1].split(',').map(|v| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty()).collect();
-                    if !vs.is_empty() {
-                        verb = vs.join("|");
-                    }
-                }
+                verb = methods_of(head).unwrap_or_else(|| "ANY".into());
             }
             return Some((verb, c[2].to_string()));
         }
     }
     None
+}
+
+/// A call written handler first, `add_route(handler, "/x", methods=["POST"])`, rewritten with the path first:
+/// `("/x", handler, methods=["POST"])`. None when the path already comes first or no argument is a path.
+fn handler_first(text: &str) -> Option<String> {
+    static PATH: LazyLock<Regex> = LazyLock::new(|| rx(r#"^[rRbBuUfF]*['"](/[^'"]*)['"]$"#));
+    let args = crate::mounts::args_of(text);
+    if args.len() < 2 || args[0].trim_start_matches(|c: char| "rRbBuUfF".contains(c)).starts_with(['"', '\'']) {
+        return None;
+    }
+    let at = args.iter().position(|a| PATH.is_match(a))?;
+    let mut rest = args.clone();
+    let path = rest.remove(at);
+    Some(format!("({path}, {})", rest.join(", ")))
 }
 
 /// A verb decorator that names no path, where the language writes one (NestJS `@Post()`): it answers at the class prefix
@@ -738,13 +758,17 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
             }
         }
         if ROUTE_CALLS.contains(&name.as_str()) && (recv.is_empty() || !ROUTE_BARE.contains(&name.as_str()))
+            || crate::rules::lang_route_call(f.lang.name, &name)
             || recv.is_empty() && ROUTE_BARE.contains(&name.as_str())
             || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str()))
             || on_chain.is_some() && chain.is_some_and(|ch| ch.routes.contains(&name.as_str())) {
             static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
             static FIRST_ANY: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*r?['"`](?:([A-Z]+)\s+)?([^'"`]*)['"`]"#));
             let re = if in_routes_file.is_some() || on_chain.is_some() { &FIRST_ANY } else { &FIRST };
-            if let Some(c) = re.captures(&src[callee.end_byte()..node.end_byte()]) {
+            let written = &src[callee.end_byte()..node.end_byte()];
+            let swapped = crate::rules::handler_first_call(f.lang.name, &name).then(|| handler_first(written)).flatten();
+            let text: &str = swapped.as_deref().unwrap_or(written);
+            if let Some(c) = re.captures(text) {
                 let upper = name.trim_start_matches("add_").to_uppercase();
                 let verb = match c.get(1) {
                     Some(v) => v.as_str().to_string(), // "GET /users/{id}": the verb is written in the pattern
@@ -762,7 +786,7 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     Some(on) => under(on, &path),
                     None => path,
                 };
-                let args = crate::mounts::args_of(&src[callee.end_byte()..node.end_byte()]);
+                let args = crate::mounts::args_of(text);
                 // `app.at("/x").get(h)`, `app.at("/x").at("/y")`: the call only sets the path of what is chained after it
                 let sets_path = chain.is_some_and(|ch| {
                     static NEXT: LazyLock<Regex> = LazyLock::new(|| rx(r"^\s*\.\s*(\w+)\s*\("));
@@ -778,6 +802,11 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                     Some(m) if verb == "ANY" => m[1].to_uppercase(),
                     _ => verb,
                 };
+                // `methods=["POST"]` among the arguments
+                let verb = match args.iter().filter(|a| crate::mounts::kwarg(a).is_some_and(|(k, _)| k.starts_with("method"))).find_map(|a| methods_of(a)) {
+                    Some(m) if verb == "ANY" => m.to_uppercase(),
+                    _ => verb,
+                };
                 // `.route("/x", get(list))`: the verb is the name of the wrapping call
                 let verb = match HANDLER_WRAP.captures(&handler).map(|w| w["wrap"].to_uppercase()) {
                     Some(w) if verb == "ANY" && ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&w.as_str()) => w,
@@ -789,7 +818,8 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 if INCLUDE.is_match(&handler) || sets_path || mounts_router {
                     // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
                 } else {
-                    let recv = if on_chain.is_some() { chain_root() } else { recv.rsplit('.').next().unwrap_or("").to_string() };
+                    // the whole object the route is registered on (`api.router`): any name in it may be the router that is mounted
+                    let recv = if on_chain.is_some() { chain_root() } else { recv.to_string() };
                     f.routes.push(Route { verb, path, line, at: callee.start_byte(), end: node.end_byte(), def, recv, handler, name: String::new() });
                 }
             }
