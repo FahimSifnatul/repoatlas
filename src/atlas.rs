@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use crate::finder::Finder;
 use crate::graph::{self, Gid};
-use crate::journey::{step_io, steps_json, Ctx, Step, Walk, MAX_ROUTES, MAX_ROUTE_STEPS, MAX_STEPS};
+use crate::journey::{reach as calls_reach, step_io, steps_json, Ctx, Walk, MAX_ROUTES, MAX_ROUTE_STEPS, MAX_STEPS};
 use crate::lang::LANGS;
 use crate::launch::{dependencies, find_launches, Launch};
 use crate::layers::{build_units, classify, conventions, stem, Tally};
@@ -182,8 +182,12 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     let mut ulayer: BTreeMap<String, &'static str> = BTreeMap::new();
     for u in units {
         let mut c: Tally<&'static str> = Tally::default();
+        let code = u.files.iter().any(|p| files[ix[p]].layer != Some("tests"));
         for p in &u.files {
             let f = &files[ix[p]];
+            if code && f.layer == Some("tests") {
+                continue; // a tests/ folder inside a part does not make the part tests
+            }
             c.add(f.layer.unwrap_or("logic"), f.loc); // files with no clue count as logic, so one small named file can't decide a folder
         }
         let ly = u.layer.unwrap_or_else(|| c.top().unwrap_or("logic"));
@@ -694,31 +698,45 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
     let mut flow = Value::Null;
     if !procs.is_empty() {
         let mut out = vec![];
-        let mut seen_units: HashSet<String> = HashSet::new();
+        // what the one map of the whole codebase is drawn from
+        let mut all_starts: Vec<Gid> = vec![];
+        let mut route_starts: Vec<Gid> = vec![];
+        let mut reached_files: BTreeSet<String> = BTreeSet::new();
+        let mut runs: Vec<(Vec<String>, Vec<String>)> = vec![];
+        // per program: what it starts at and the files it loads, to say which parts belong to it alone
+        let mut lane_of: Vec<(Vec<Gid>, BTreeSet<String>)> = vec![];
         for P in &procs {
             let mut walk = Walk::new(&ctx, MAX_STEPS);
             // the command names the function it runs (`pkg.cli:main`), else the file's own start
             let func = P.chain.last().and_then(|c| words(&c.cmd).iter().find_map(|w| w.split_once(':').map(|x| x.1.to_string())));
-            let start_defs: Vec<Gid> = P.starts.iter().map(|s| {
+            let mut start_defs: Vec<Gid> = vec![];
+            for s in &P.starts {
                 let fi = ix[s];
                 let f = &files[fi];
                 let di = func.as_deref().filter(|n| !n.is_empty()).and_then(|n| f.def_named(n)).unwrap_or_else(|| f.entry_def());
-                (fi, di)
-            }).collect();
+                // the top level of the file runs first (routes registered, the database opened) when it does anything
+                if di != 0 && f.calls.iter().enumerate().any(|(ci, c)| c.def == 0 && !targets[fi][ci].is_empty()) {
+                    start_defs.push((fi, 0));
+                }
+                start_defs.push((fi, di));
+            }
             for &g in &start_defs {
                 walk.visit(g, 0, "start", false, "");
             }
+            all_starts.extend(start_defs.iter().copied());
             let mut fr = reach(&files, &P.starts);
             fr.extend(P.chain.iter().flat_map(|c| c.targets.iter().cloned()));
             // files the framework loads for a package the journey passes through
             let in_steps: HashSet<usize> = walk.steps.iter().map(|s| s.file).collect();
             let near: HashSet<&str> = in_steps.iter().flat_map(|&i| std::iter::once(files[i].path.as_str()).chain(files[i].uses.iter().map(|u| u.as_str()))).collect();
             let loaded: Vec<usize> = conv.iter().filter(|(a, m)| near.contains(a.as_str()) && !in_steps.contains(&ix[m])).map(|(_, m)| ix[m]).collect::<BTreeSet<_>>().into_iter().take(12).collect();
+            reached_files.extend(loaded.iter().map(|&m| files[m].path.clone()));
             for m in loaded {
                 walk.loads(m);
             }
             let steps = walk.steps;
             // web endpoints of the files this program loads
+            let rs0 = route_starts.len();
             let mut routes = vec![];
             // a shell script that starts something else does not answer its requests
             let shell_only = P.starts.iter().all(|s| files[ix[s]].lang.name == "Shell");
@@ -869,6 +887,8 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                     found.push((verb, full(&r.recv, r.at, "", &r.path), r.line, hs, pre, guess));
                 }
                 for (verb, path, line, hs, pre, guess) in found {
+                    // the map covers every endpoint, though the list below it stops at MAX_ROUTES
+                    route_starts.extend(pre.iter().chain(hs.iter()).copied());
                     if routes.len() >= MAX_ROUTES {
                         break;
                     }
@@ -909,36 +929,16 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                     parts.push(u.clone());
                 }
             }
-            // the map's arrows: a step's part to the part of each step nested right under it
-            let mut edges: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-            for list in std::iter::once(&steps).chain(routes.iter().map(|r| &r.1)) {
-                let mut above: Vec<&Step> = vec![];
-                for s in list.iter().filter(|s| s.kind != "more") {
-                    while above.last().is_some_and(|a| a.depth >= s.depth) {
-                        above.pop();
-                    }
-                    if let Some(a) = above.last() {
-                        let (ua, ub) = (unit_of[&files[a.file].path].as_str(), unit_of[&files[s.file].path].as_str());
-                        if ua != ub {
-                            *edges.entry((ua, ub)).or_default() += 1;
-                        }
-                    }
-                    above.push(s);
-                }
-            }
-            let edges: Vec<Value> = edges.into_iter().map(|((a, b), n)| json!([a, b, n])).collect();
-            seen_units.extend(fr.iter().map(|p| unit_of[p].clone()));
-            seen_units.extend(parts.iter().cloned());
-            for p in &P.also {
-                seen_units.insert(unit_of[p].clone());
-            }
-            for c in &P.chain {
-                for s in std::iter::once(&c.file).chain(c.targets.iter()) {
-                    if let Some(u) = unit_of.get(s) {
-                        seen_units.insert(u.clone());
-                    }
-                }
-            }
+            reached_files.extend(fr.iter().cloned());
+            let unit = |p: &String| unit_of.get(p).cloned();
+            let mut from: Vec<String> = P.chain.iter().filter_map(|c| unit(&c.file)).collect();
+            let mut to: Vec<String> = P.starts.iter().chain(&P.also).chain(P.chain.iter().flat_map(|c| c.targets.iter())).filter_map(unit).collect();
+            to.sort();
+            to.dedup();
+            from.retain(|u| !to.contains(u));
+            from.dedup();
+            runs.push((from, to));
+            lane_of.push((start_defs.iter().copied().chain(route_starts[rs0..].iter().copied()).collect(), fr.clone()));
 
             // the story in one paragraph
             let mut text = String::new();
@@ -1014,12 +1014,74 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             out.push(json!({
                 "name": P.name, "command": short(&P.cmd), "narrative": text, "entries": P.starts, "chain": chain_files,
                 "steps": steps_json(&ctx, &steps), "routes": routes.into_iter().map(|r| r.0).collect::<Vec<_>>(),
-                "parts": parts, "edges": edges, "io": io_map,
+                "parts": parts, "io": io_map,
             }));
         }
-        let mut unreached: Vec<&String> = ulayer.keys().filter(|u| !seen_units.contains(*u) && ulayer[*u] != "tests").collect();
+        // ---- one map of the whole codebase: every part any program (or any web endpoint) can run
+        all_starts.extend(route_starts);
+        let rc = calls_reach(&ctx, &all_starts);
+        let up = |fi: usize| unit_of[&files[fi].path].as_str();
+        let shown = |u: &str| ulayer[u] != "tests";
+        let mut map_edges: BTreeMap<(String, String), (usize, bool)> = BTreeMap::new();
+        for (&(a, b), &n) in &rc.files {
+            let (ua, ub) = (up(a), up(b));
+            if ua != ub && shown(ua) && shown(ub) {
+                map_edges.entry((ua.to_string(), ub.to_string())).or_default().0 += n;
+            }
+        }
+        let mut map_units: BTreeSet<String> = rc.defs.iter().map(|g| up(g.0).to_string()).filter(|u| shown(u)).collect();
+        for (from, to) in &runs {
+            map_units.extend(from.iter().chain(to).filter(|u| shown(u)).cloned());
+        }
+        // reached only by an import or because the framework loads it: a dashed line from a part that is on the map
+        loop {
+            let mut grew = false;
+            for p in reached_files.iter() {
+                let u = unit_of[p].as_str();
+                if !map_units.contains(u) {
+                    continue;
+                }
+                for q in files[ix[p]].uses.iter().filter(|q| reached_files.contains(*q)) {
+                    let v = unit_of[q].as_str();
+                    if v != u && shown(v) && !map_units.contains(v) {
+                        map_units.insert(v.to_string());
+                        map_edges.insert((u.to_string(), v.to_string()), (1, true));
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        // what comes in and goes out: every part that does it
+        let mut map_io: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        for g in &rc.defs {
+            let u = up(g.0);
+            if !shown(u) {
+                continue;
+            }
+            let defs = &files[g.0].defs;
+            let top = if all_starts.contains(g) { &defs[0].io[..] } else { &[][..] };
+            for k in defs[g.1].io.iter().chain(top) {
+                map_io.entry(crate::tables::io_order(k)).or_default().insert(u.to_string());
+            }
+        }
+        let map_io: Map<String, Value> = map_io.into_iter().map(|(i, us)| (IO[i].key.to_string(), json!(us))).collect();
+        // per program: the parts it runs or loads
+        let lanes: Vec<Vec<String>> = lane_of.iter().enumerate().map(|(j, (starts, fr))| {
+            let mut us: BTreeSet<String> = calls_reach(&ctx, starts).defs.iter().map(|g| up(g.0).to_string()).collect();
+            us.extend(fr.iter().filter_map(|p| unit_of.get(p).cloned()));
+            us.extend(runs[j].0.iter().chain(&runs[j].1).cloned()); // the files that start it are its own
+            us.into_iter().filter(|u| map_units.contains(u)).collect()
+        }).collect();
+        let flow_map = json!({
+            "parts": map_units, "io": map_io, "runs": runs, "lanes": lanes,
+            "edges": map_edges.into_iter().map(|((a, b), (n, cv))| if cv { json!([a, b, n, 1]) } else { json!([a, b, n]) }).collect::<Vec<_>>(),
+        });
+        let mut unreached: Vec<&String> = ulayer.keys().filter(|u| !map_units.contains(*u) && shown(u)).collect();
         unreached.sort_by_key(|u| (ulayer[*u] == "config", std::cmp::Reverse(nodes[*u].loc), u.to_string()));
-        flow = json!({"kind": entry_kind, "processes": out, "unreached": unreached});
+        flow = json!({"kind": entry_kind, "processes": out, "map": flow_map, "unreached": unreached});
     }
 
     // ---- repository summary

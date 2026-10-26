@@ -1,13 +1,13 @@
 //! A program's journey: from the definition it starts at, every call it makes in the order the code makes
 //! them, down to where its input comes in and its output goes out. One more journey per web endpoint.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde_json::{json, Value};
 
 use crate::graph::Gid;
 use crate::parse::{File, Kind};
-use crate::resolve::basename;
+use crate::resolve::{basename, dirname};
 
 pub const MAX_STEPS: usize = 400;
 pub const MAX_ROUTE_STEPS: usize = 80;
@@ -93,6 +93,85 @@ impl<'a> Ctx<'a> {
             .take(12)
             .collect()
     }
+}
+
+/// Every definition the starts can run, and how often one file calls into another. Unlike `Walk` it has no depth
+/// or step limit and shows each definition once: it is what the whole-codebase map is drawn from.
+pub struct Reach {
+    pub defs: BTreeSet<Gid>,
+    /// (calling file, called file) -> calls
+    pub files: BTreeMap<(usize, usize), usize>,
+}
+
+pub fn reach(ctx: &Ctx, starts: &[Gid]) -> Reach {
+    let mut out = Reach { defs: BTreeSet::new(), files: BTreeMap::new() };
+    // per file, per definition: its calls (built when a file is first reached)
+    let mut by_def: HashMap<usize, HashMap<usize, Vec<usize>>> = HashMap::new();
+    let mut todo: VecDeque<Gid> = VecDeque::new();
+    // code that runs when a file loads: its top level, and for Go the whole package (var initializers, init())
+    let mut loaded: BTreeSet<usize> = BTreeSet::new();
+    let mut go_dirs: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, f) in ctx.files.iter().enumerate().filter(|(_, f)| f.lang.name == "Go") {
+        go_dirs.entry(dirname(&f.path)).or_default().push(i);
+    }
+    let mut does: HashMap<usize, bool> = HashMap::new();
+    for &g in starts {
+        if out.defs.insert(g) {
+            todo.push_back(g);
+        }
+    }
+    while let Some(g) = todo.pop_front() {
+        let f = &ctx.files[g.0];
+        let calls = by_def.entry(g.0).or_insert_with(|| {
+            let mut m: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (i, c) in f.calls.iter().enumerate() {
+                m.entry(c.def).or_default().push(i);
+            }
+            m
+        });
+        let mut next: Vec<Gid> = vec![];
+        if loaded.insert(g.0) {
+            if g.1 != 0 {
+                next.push((g.0, 0));
+            }
+            if f.lang.name == "Go" {
+                for &q in go_dirs.get(dirname(&f.path)).into_iter().flatten() {
+                    next.push((q, 0));
+                    next.extend(ctx.files[q].defs.iter().enumerate().filter(|(_, d)| d.kind == Kind::Func && d.owner.is_none() && d.name == "init").map(|(i, _)| (q, i)));
+                }
+            }
+            // an import runs the top level of the file it names, when that does anything
+            for q in f.uses.iter().filter_map(|u| ctx.ix.get(u).copied()).filter(|&q| q != g.0 && ctx.files[q].layer != Some("tests")) {
+                let acts = *does.entry(q).or_insert_with(|| {
+                    let tg = &ctx.targets[q];
+                    ctx.files[q].calls.iter().enumerate().any(|(i, c)| c.def == 0 && !tg[i].is_empty())
+                });
+                if acts {
+                    next.push((q, 0));
+                }
+            }
+        }
+        let own = calls.get(&g.1).map(|v| v.as_slice()).unwrap_or(&[]);
+        for &ci in own {
+            next.extend(ctx.targets[g.0][ci].iter().copied());
+        }
+        // a start that calls nothing itself (a library, a page): what it defines and the scripts it loads
+        if own.iter().all(|&ci| ctx.targets[g.0][ci].is_empty()) && f.defs[g.1].kind == Kind::Module {
+            next.extend(ctx.defines(g.0));
+            if f.lang.grammar.is_none() {
+                next.extend(f.uses.iter().filter_map(|u| ctx.ix.get(u).filter(|&&i| ctx.files[i].lang.grammar.is_some()).map(|&i| (i, 0))));
+            }
+        }
+        for t in next {
+            if t.0 != g.0 {
+                *out.files.entry((g.0, t.0)).or_default() += 1;
+            }
+            if out.defs.insert(t) {
+                todo.push_back(t);
+            }
+        }
+    }
+    out
 }
 
 pub struct Walk<'c, 'a> {

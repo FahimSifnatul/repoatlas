@@ -20,6 +20,17 @@ enum RustHit {
     None,
 }
 
+/// The folder and every folder above it, nearest first.
+pub fn ancestors(d: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = d;
+    while !cur.is_empty() {
+        out.push(cur.to_string());
+        cur = dirname(cur);
+    }
+    out
+}
+
 pub fn dirname(p: &str) -> &str {
     p.rfind('/').map(|i| &p[..i]).unwrap_or("")
 }
@@ -146,21 +157,31 @@ impl Project {
         let d = dirname(&f.path);
         for imp in f.py_imports.iter().filter(|i| i.is_from) {
             let mut parts: Vec<&str> = if imp.module.is_empty() { vec![] } else { imp.module.split('.').collect() };
-            let roots = if imp.level > 0 {
+            let mut tries: Vec<Vec<String>> = vec![];
+            if imp.level > 0 {
                 let base: Vec<&str> = if d.is_empty() { vec![] } else { d.split('/').collect() };
                 let mut b = base[..base.len().saturating_sub(imp.level - 1)].to_vec();
                 b.extend(parts);
                 parts = b;
-                vec![String::new()]
+                tries.push(vec![String::new()]);
             } else {
-                self.py_roots.clone()
-            };
-            let module = self.py_file(&parts, &roots);
-            for n in imp.names.iter().filter(|n| *n != "*") {
-                let mut sub = parts.clone();
-                sub.push(n);
-                if let Some(h) = self.py_file(&sub, &roots).or_else(|| module.clone()) {
-                    out.push((n.clone(), h));
+                tries.push(self.py_roots.clone());
+                if !parts.is_empty() && !PYTHON_STDLIB.contains(&parts[0]) {
+                    tries.extend(ancestors(d).into_iter().map(|a| vec![a])); // the code root is a folder above the file
+                }
+            }
+            for roots in tries {
+                let module = self.py_file(&parts, &roots);
+                let before = out.len();
+                for n in imp.names.iter().filter(|n| *n != "*") {
+                    let mut sub = parts.clone();
+                    sub.push(n);
+                    if let Some(h) = self.py_file(&sub, &roots).or_else(|| module.clone()) {
+                        out.push((n.clone(), h));
+                    }
+                }
+                if out.len() > before {
+                    break;
                 }
             }
         }
@@ -222,6 +243,33 @@ impl Project {
         None
     }
 
+    /// The files an import names under `roots`: `from a.b import c` is a/b/c.py, else a/b.py.
+    fn py_hits(&self, imp: &crate::parse::PyImport, parts: &[&str], roots: &[String]) -> Vec<String> {
+        let mut hits = vec![];
+        if imp.is_from {
+            for n in imp.names.iter().filter(|n| *n != "*") {
+                let mut p = parts.to_vec();
+                p.push(n);
+                if let Some(h) = self.py_file(&p, roots) {
+                    hits.push(h);
+                }
+            }
+            if hits.len() < imp.names.len() || imp.names.is_empty() {
+                if let Some(b) = self.py_file(parts, roots) {
+                    hits.push(b);
+                }
+            }
+        } else {
+            for k in (1..=parts.len()).rev() {
+                if let Some(h) = self.py_file(&parts[..k], roots) {
+                    hits.push(h);
+                    break;
+                }
+            }
+        }
+        hits
+    }
+
     fn resolve_python(&self, f: &File) -> Uses {
         let (mut uses, mut ext) = (BTreeSet::new(), BTreeSet::new());
         let d = dirname(&f.path);
@@ -239,44 +287,20 @@ impl Project {
             } else {
                 roots = self.py_roots.clone();
             }
-            let mut hits = vec![];
-            if imp.is_from {
-                for n in imp.names.iter().filter(|n| *n != "*") {
-                    let mut p = parts.clone();
-                    p.push(n);
-                    if let Some(h) = self.py_file(&p, &roots) {
-                        hits.push(h);
-                    }
-                }
-                if hits.len() < imp.names.len() || imp.names.is_empty() {
-                    if let Some(b) = self.py_file(&parts, &roots) {
-                        hits.push(b);
-                    }
-                }
-            } else {
-                for k in (1..=parts.len()).rev() {
-                    if let Some(h) = self.py_file(&parts[..k], &roots) {
-                        hits.push(h);
+            let mut hits = self.py_hits(imp, &parts, &roots);
+            if hits.is_empty() && imp.level == 0 && !parts.is_empty() && !PYTHON_STDLIB.contains(&parts[0]) {
+                // a script importing a sibling file, or the code root is a folder above it (source/ copied to /app)
+                for a in ancestors(d) {
+                    hits = self.py_hits(imp, &parts, std::slice::from_ref(&a));
+                    if !hits.is_empty() {
                         break;
                     }
                 }
             }
             if !hits.is_empty() {
                 uses.extend(hits);
-            } else if imp.level == 0 && !parts.is_empty() {
-                if PYTHON_STDLIB.contains(&parts[0]) {
-                    continue;
-                }
-                // a script importing a sibling file
-                let sib = if d.is_empty() { None } else { self.py_file(&parts, &[d.to_string()]) };
-                match sib {
-                    Some(s) => {
-                        uses.insert(s);
-                    }
-                    None => {
-                        ext.insert((parts[0].to_string(), imp.module.clone()));
-                    }
-                }
+            } else if imp.level == 0 && !parts.is_empty() && !PYTHON_STDLIB.contains(&parts[0]) {
+                ext.insert((parts[0].to_string(), imp.module.clone()));
             }
         }
         // importing a.b.c runs a/__init__.py and a/b/__init__.py first

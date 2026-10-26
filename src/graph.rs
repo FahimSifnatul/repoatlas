@@ -327,7 +327,7 @@ impl<'a> Index<'a> {
         let seen = |i: usize| {
             let p = &self.files[i].path;
             let st = crate::layers::stem(p);
-            st == root || crate::resolve::basename(dirname(p)) == root
+            st == root || dirname(p).split('/').any(|d| d == root) // `import api.v1.users`: api is a folder above users.py
         };
         let crate_lib = self.crates.get(root).copied().filter(|_| !rooted);
         let internal = rooted || bound.is_some() || crate_lib.is_some() || f.mods.iter().any(|m| m == root) || imported.iter().any(|&i| seen(i));

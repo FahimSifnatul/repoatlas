@@ -143,8 +143,13 @@ pub fn build_units(files: &[File], small: bool) -> Units {
     let dominant = |d: &str| -> (Option<&'static str>, f64) {
         let mut c: Tally<&'static str> = Tally::default();
         let mut total = 0;
+        // a folder holding a tests/ folder is still the code beside it: tests count only where nothing else is
+        let code = u.sub[d].iter().any(|p| by[p.as_str()].layer != Some("tests"));
         for p in &u.sub[d] {
             let f = by[p.as_str()];
+            if code && f.layer == Some("tests") {
+                continue;
+            }
             total += f.loc;
             if let Some(l) = f.layer {
                 c.add(l, f.loc);

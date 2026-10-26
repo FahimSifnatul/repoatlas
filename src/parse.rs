@@ -350,7 +350,13 @@ fn docstring(node: Node, src: &str) -> String {
         Some(s) if s.kind() == "string" => {
             let t = &src[s.byte_range()];
             let t = t.trim_start_matches(|c: char| "rRbBuUfF".contains(c));
-            first_sentence(t.trim_matches(|c| c == '"' || c == '\''), 150)
+            let t = t.trim_matches(|c| c == '"' || c == '\'');
+            // a banner drawn in characters says nothing: most of the text must be letters
+            let letters = t.chars().filter(|c| c.is_alphabetic()).count();
+            if letters * 2 < t.chars().filter(|c| !c.is_whitespace()).count() {
+                return String::new();
+            }
+            first_sentence(t, 150)
         }
         _ => String::new(),
     }

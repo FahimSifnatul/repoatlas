@@ -481,25 +481,117 @@ fn inputs_and_outputs_reach_the_flow() {
 }
 
 #[test]
-fn process_edges_join_units() {
+fn map_joins_units_across_programs() {
     let d = analyze(&[
         ("app/main.py", "from core.lib import work\n\nif __name__ == '__main__':\n    work()\n"),
         ("core/lib.py", "def work():\n    return 1\n"),
     ]);
-    let p = &procs(&d)[0];
-    assert_eq!(sorted(strs(&p["parts"])), ["app", "core"]);
-    assert_eq!(p["edges"], serde_json::json!([["app", "core", 1]]));
+    let m = &d["flow"]["map"];
+    assert_eq!(sorted(strs(&m["parts"])), ["app", "core"]);
+    assert_eq!(m["edges"], serde_json::json!([["app", "core", 1]]));
+    assert_eq!(m["runs"], serde_json::json!([[[], ["app"]]]));
+    assert!(strs(&d["flow"]["unreached"]).is_empty());
 }
 
 #[test]
-fn process_edges_empty_for_one_unit() {
+fn map_is_empty_of_edges_for_one_unit() {
     let d = analyze(&[("main.py", "def a():\n    return b()\n\ndef b():\n    return 1\n\nif __name__ == '__main__':\n    a()\n")]);
     let p = &procs(&d)[0];
     assert_eq!(steps(p).len(), 3);
-    assert_eq!(p["edges"], serde_json::json!([]));
+    assert_eq!(d["flow"]["map"]["edges"], serde_json::json!([]));
 }
 
-// ---------------------------------------------------------------- journeys: every step, in order
+#[test]
+fn map_has_one_box_per_program_and_one_map() {
+    let d = analyze(&[
+        ("a/main.py", "from core.lib import work\n\nif __name__ == '__main__':\n    work()\n"),
+        ("b/main.py", "from core.lib import work\n\nif __name__ == '__main__':\n    work()\n"),
+        ("core/lib.py", "def work():\n    return 1\n"),
+    ]);
+    assert_eq!(procs(&d).len(), 2);
+    let m = &d["flow"]["map"];
+    assert_eq!(m["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(sorted(strs(&m["parts"])), ["a", "b", "core"]);
+    assert!(procs(&d).iter().all(|p| p.get("edges").is_none()));
+    // each program has a row of its own; the part both use belongs to neither alone
+    let lanes = m["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), 2);
+    assert!(strs(&lanes[0]).contains(&"core".to_string()) && strs(&lanes[1]).contains(&"core".to_string()));
+}
+
+#[test]
+fn map_follows_calls_past_the_step_limit() {
+    // a chain of 12 files: the journey stops at its depth limit, the map does not
+    let mut files: Vec<(String, String)> = vec![("p0/main.py".into(), "from p1.m import f\n\nif __name__ == '__main__':\n    f()\n".into())];
+    for i in 1..12 {
+        let body = if i < 11 { format!("from p{}.m import f as g\n\ndef f():\n    return g()\n", i + 1) } else { "def f():\n    return 1\n".to_string() };
+        files.push((format!("p{i}/m.py"), body));
+    }
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let d = analyze(&refs);
+    assert!(strs(&d["flow"]["map"]["parts"]).contains(&"p11".to_string()));
+    assert!(!strs(&d["flow"]["unreached"]).contains(&"p11".to_string()));
+}
+
+#[test]
+fn map_follows_routes_registered_when_a_file_loads() {
+    // gunicorn app:app imports app.py, whose top level registers the routes; `source/` is the code root
+    let d = analyze(&[
+        ("runner.sh", "#!/bin/bash\nAPP_START_CMD=\"gunicorn app:app --bind 0.0.0.0:4023\"\nexec $APP_START_CMD\n"),
+        ("source/app.py", "from api.routes import add_routes\n\napp = object()\nadd_routes(app)\n"),
+        ("source/api/routes.py", "import api.users\nfrom api import items\n\n\ndef add_routes(app):\n    app.add_route(api.users.get, '/u')\n    app.add_route(items.get, '/i')\n"),
+        ("source/api/users.py", "def get(request):\n    return helper()\n\n\ndef helper():\n    return 1\n"),
+        ("source/api/items.py", "from models import save\n\n\ndef get(request):\n    return save()\n"),
+        ("source/models/__init__.py", "def save():\n    return 1\n"),
+    ]);
+    let p = &procs(&d)[0];
+    assert_eq!(strs(&p["entries"]), ["source/app.py"], "{:?}", proc_names(&d));
+    let m = &d["flow"]["map"];
+    let edges = m["edges"].as_array().unwrap();
+    assert!(edges.iter().all(|e| e.as_array().unwrap().len() == 3), "calls, not imports: {m}");
+    assert!(strs(&m["parts"]).iter().any(|u| u.starts_with("source/models")), "{m}");
+}
+
+#[test]
+fn a_tests_folder_inside_a_part_does_not_make_it_tests() {
+    let mut files: Vec<(String, String)> = vec![("main.py".into(), "from pkg.a import run\n\nif __name__ == '__main__':\n    run()\n".into())];
+    files.push(("pkg/a.py".into(), "def run():\n    return 1\n".into()));
+    files.push(("pkg/b.py".into(), "def other():\n    return 2\n".into()));
+    for i in 0..4 {
+        files.push((format!("pkg/tests/test_{i}.py"), "def test_it():\n    assert 1 == 1\n".repeat(20)));
+    }
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let d = analyze(&refs);
+    let m = &d["flow"]["map"];
+    assert!(strs(&m["parts"]).iter().any(|u| u == "pkg" || u.starts_with("pkg/a")), "{m}");
+}
+
+#[test]
+fn go_package_init_and_variables_run_when_the_package_loads() {
+    let d = analyze(&[
+        ("go.mod", "module svc\n\ngo 1.21\n"),
+        ("main.go", "package main\n\nimport \"svc/cmd\"\n\nfunc main() {\n\tcmd.Execute()\n}\n"),
+        ("cmd/root.go", "package cmd\n\nfunc Execute() {\n\trun()\n}\n"),
+        ("cmd/serve.go", "package cmd\n\nimport \"svc/app\"\n\nvar serveCmd = func() error {\n\treturn app.Serve()\n}\n"),
+        ("app/serve.go", "package app\n\nfunc Serve() error {\n\treturn nil\n}\n"),
+    ]);
+    let m = &d["flow"]["map"];
+    assert!(m["edges"].as_array().unwrap().iter().all(|e| e.as_array().unwrap().len() == 3), "calls, not imports: {m}");
+    let parts = strs(&m["parts"]);
+    assert!(parts.iter().any(|u| u.starts_with("app")), "{m}");
+}
+
+#[test]
+fn map_shows_a_part_that_is_imported_but_never_called() {
+    let d = analyze(&[
+        ("app/main.py", "import core.settings\n\ndef go():\n    return 1\n\nif __name__ == '__main__':\n    go()\n"),
+        ("core/settings.py", "DEBUG = True\n"),
+    ]);
+    let m = &d["flow"]["map"];
+    assert!(strs(&m["parts"]).contains(&"core".to_string()), "{m}");
+    assert!(m["edges"].as_array().unwrap().iter().any(|e| e[0] == "app" && e[1] == "core" && e[3] == 1), "{m}");
+    assert!(!strs(&d["flow"]["unreached"]).contains(&"core".to_string()));
+}
 
 #[test]
 fn a_command_line_journey_follows_the_calls_in_order() {

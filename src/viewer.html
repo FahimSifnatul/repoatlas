@@ -107,6 +107,18 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
   border-left:6px solid var(--c);border-radius:10px;padding:11px 14px 11px;transition:background .12s,border-color .12s,opacity .15s}
 .node:hover{background:color-mix(in srgb,var(--c) 7%,#fff);border-color:var(--c)}
 .map .col{justify-content:flex-start}   /* a long column of parts would push short ones far down the page */
+.node.run[aria-current=true]{background:color-mix(in srgb,var(--ink) 8%,#fff);border-color:var(--ink)}
+.graph.wide{--w:min(1600px,calc(100vw - 48px));width:var(--w);margin-left:min(0px,calc((100% - var(--w)) / 2))}
+.lanes .node{padding:7px 10px;border-left-width:5px}
+.lanes .nm{font-size:14px}
+.lanes .ms{font-size:11.5px}
+.lanes .edges .e{opacity:.2;stroke-width:1.4px}
+.lanes.focus .edges .e.hl{opacity:1;stroke-width:2.4px}
+.lanes{display:grid;column-gap:36px}
+.lhead{font:650 12px var(--body);color:var(--ink3);text-transform:uppercase;letter-spacing:.05em;padding:0 2px 8px}
+.lcell{display:flex;flex-direction:column;justify-content:center;gap:12px;padding:14px 0;border-top:1.5px solid var(--line);min-width:0}
+.lname{font:600 13px var(--body);color:var(--ink3)}
+.lanes .ds{display:none}
 .node.io{cursor:default;border-style:dashed;border-left-style:solid;background:color-mix(in srgb,var(--c) 6%,#fff)}
 .nm{display:flex;align-items:center;gap:8px;font:650 16px/1.25 var(--display);color:var(--ink)}
 .nm svg{flex:none;color:var(--c)}
@@ -310,11 +322,20 @@ function layout(ids, edges) {
   return {cols, edges: keep.map(([a, b]) => [a, b, w[a + '>' + b]])};
 }
 
-const isIo = id => id.startsWith('io:');
-const tint = id => isIo(id) ? WAY[IO[id.slice(3)][1]] : colorOf(N[id]);
+const isIo = id => id.startsWith('io:'), isRun = id => id.startsWith('run:');
+const ioKey = id => id.slice(3).split('@')[0];   // io:db@2 is the database box of row 2
+const tint = id => isRun(id) ? 'var(--ink)' : isIo(id) ? WAY[IO[ioKey(id)][1]] : colorOf(N[id]);
+let shownRun = 0;   // the program whose steps are listed below the map
 function card(id, showPath) {
+  if (isRun(id)) {                        // a program: where its journey starts; opens its steps
+    const j = +id.slice(4), P = D.flow.processes[j];
+    return el('button', {class:'node run', style:`--c:var(--ink)`, 'data-id':id, 'aria-current': j === shownRun ? 'true' : null, onclick:() => go('@flow/' + j)},
+      el('div', {class:'nm'}, svg('flag', 18), el('span', {}, P.name)),
+      P.command ? el('div', {class:'pth', title:P.command}, P.command) : null,
+      el('p', {class:'ds'}, 'Program. Click to follow its steps.'));
+  }
   if (isIo(id)) {                         // what the program takes in or gives out: not a page, so not clickable
-    const k = id.slice(3);
+    const k = ioKey(id);
     return el('div', {class:'node io', style:`--c:${tint(id)}`, 'data-id':id},
       el('div', {class:'nm'}, el('span', {}, IO[k][0])),
       el('p', {class:'ds'}, SAYS[IO[k][1]]));
@@ -341,7 +362,11 @@ function graph({cols, edges, showPath}) {
   const n = cols.length, avail = Math.min(innerWidth - 48, 1072), cg = n > 3 ? 56 : 84;
   inner.style.setProperty('--cg', cg + 'px');
   inner.style.setProperty('--cw', Math.max(210, Math.min(262, Math.floor((avail - (n - 1) * cg) / n))) + 'px');
-  const wrap = el('div', {class:'graph'}, inner);
+  wire(inner, sv, cards, edges);
+  return el('div', {class:'graph'}, inner);
+}
+// the connecting lines: drawn over the laid-out cards, redrawn when the size changes, and lit by hovering a card
+function wire(inner, sv, cards, edges) {
   const drawn = [];
   const draw = () => {
     sv.replaceChildren(); drawn.length = 0;
@@ -350,15 +375,16 @@ function graph({cols, edges, showPath}) {
       const ea = cards[a], eb = cards[b];
       if (!ea || !eb) continue;
       const x1 = ea.offsetLeft + ea.offsetWidth, y1 = ea.offsetTop + ea.offsetHeight / 2;
-      const x2 = eb.offsetLeft - 7, y2 = eb.offsetTop + eb.offsetHeight / 2, dx = Math.max(36, (x2 - x1) / 2);
+      const y2 = eb.offsetTop + eb.offsetHeight / 2, back = eb.offsetLeft < x1 + 4;   // back: the line returns to a part in the same or an earlier column
+      const x2 = back ? eb.offsetLeft + eb.offsetWidth + 7 : eb.offsetLeft - 7, dx = back ? 44 : Math.max(36, (x2 - x1) / 2);
       const col = tint(a);
       const p = document.createElementNS(NS, 'path');
       p.setAttribute('class', cv ? 'e conv' : 'e'); p.style.stroke = col;
       p.setAttribute('stroke-width', (1.6 + Math.min(2.4, Math.log2((wt || 1) + 1) * 0.55)).toFixed(2));
-      p.setAttribute('d', `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
+      p.setAttribute('d', back ? `M${x1},${y1} C${x1 + dx},${y1} ${x2 + dx},${y2} ${x2},${y2}` : `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
       const t = document.createElementNS(NS, 'path');
       t.setAttribute('class', 'tip'); t.style.fill = col;
-      t.setAttribute('d', `M${x2 + 5},${y2} l-9,-5.5 l0,11 z`);
+      t.setAttribute('d', back ? `M${x2 - 5},${y2} l9,-5.5 l0,11 z` : `M${x2 + 5},${y2} l-9,-5.5 l0,11 z`);
       sv.append(p, t); drawn.push({a, b, p, t});
     }
   };
@@ -374,7 +400,6 @@ function graph({cols, edges, showPath}) {
   });
   new ResizeObserver(draw).observe(inner);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
-  return wrap;
 }
 const grid = (ids, showPath) => el('div', {class:'grid'}, ids.map(id => card(id, showPath)));
 
@@ -514,28 +539,62 @@ function outline(steps, open, prefix) {
   show();
   return ol;
 }
-// inputs on the left, the parts the program passes through joined by its calls, outputs (and two-way ones) on the right;
-// one column per call depth, every part drawn: a wide map scrolls sideways
-function systemMap(F) {
-  const has = new Set(F.parts.filter(id => N[id]));
-  const partOf = p => { for (let c = p; c && N[c]; c = N[c].parent) if (has.has(c)) return c; return null; };
-  const ins = [], outs = [], links = [];
-  for (const [k, files] of Object.entries(F.io || {})) {
-    if (!IO[k]) continue;
-    const id = 'io:' + k, to = [...new Set(files.map(partOf).filter(Boolean))];
-    if (IO[k][1] === 'in') { ins.push(id); to.forEach(p => links.push([id, p, 1])); }
-    else { outs.push(id); to.forEach(p => links.push([p, id, 1])); }
+// one map of the whole codebase. A row per program (parts only it runs), then a row for parts several programs share;
+// columns are fixed: what comes in, where the program starts, one per layer, what goes out. Dashed lines are parts that
+// are loaded or imported but not called.
+function lanes() {
+  const M = D.flow.map, P = D.flow.processes, has = new Set(M.parts.filter(id => N[id])), owner = {};
+  M.lanes.forEach((us, j) => us.forEach(u => { if (has.has(u)) owner[u] = u in owner ? -1 : j; }));
+  has.forEach(u => { if (!(u in owner)) owner[u] = -1; });
+  const rows = P.map((_, j) => j);
+  if ([...has].some(u => owner[u] === -1)) rows.push(-1);
+  const layers = D.layers.map(l => l.key).filter(k => [...has].some(u => N[u].layer === k));
+  const lc = u => layers.includes(N[u].layer) ? N[u].layer : layers[0];
+  const ioKeys = Object.keys(M.io || {}).filter(k => IO[k] && M.io[k].some(u => has.has(u)));
+  const cols = [...(ioKeys.some(k => IO[k][1] === 'in') ? ['in'] : []), 'start', ...layers, ...(ioKeys.some(k => IO[k][1] !== 'in') ? ['out'] : [])];
+  const cards = {}, cell = {}, links = [];
+  // top to bottom in the order the calls reach them
+  const rank = {};
+  layout([...has], M.edges.filter(e => has.has(e[0]) && has.has(e[1]))).cols.flat().forEach((u, i) => { rank[u] = i; });
+  const put = (r, c, id) => { (cell[r + '|' + c] = cell[r + '|' + c] || []).push(id); cards[id] = card(id, false); };
+  const startedBy = new Set(M.runs.flatMap(r => r[0]));   // the files that start a program sit beside it
+  has.forEach(u => put(owner[u], startedBy.has(u) ? 'start' : lc(u), u));
+  P.forEach((_, j) => put(j, 'start', 'run:' + j));
+  M.runs.forEach(([from, to], j) => {
+    from.filter(u => has.has(u)).forEach(u => links.push([u, 'run:' + j, 1]));
+    to.filter(u => has.has(u)).forEach(u => links.push(['run:' + j, u, 1]));
+  });
+  for (const k of ioKeys) for (const r of rows) {
+    const us = M.io[k].filter(u => has.has(u) && owner[u] === r);
+    if (!us.length) continue;
+    const id = `io:${k}@${r}`, inn = IO[k][1] === 'in';
+    put(r, inn ? 'in' : 'out', id);
+    us.forEach(u => links.push(inn ? [id, u, 1] : [u, id, 1]));
   }
-  const es = (F.edges || []).filter(e => has.has(e[0]) && has.has(e[1]) && e[0] !== e[1]);
-  const lay = layout([...has], es);
-  const g = graph({cols:[ins, ...lay.cols, outs].filter(c => c.length), edges:[...lay.edges, ...links]});
-  g.classList.add('map');
-  return [lay.edges.length < es.length ? el('p', {class:'ftag'}, 'Some parts call each other; only the first direction is drawn.') : null, g];   // layout() drops back-edges
+  const edges = [...M.edges.filter(e => has.has(e[0]) && has.has(e[1])), ...links];
+  const inner = el('div', {class:'inner lanes'}), sv = document.createElementNS(NS, 'svg');
+  sv.setAttribute('class', 'edges');
+  const avail = innerWidth - 48;   // the map may use the whole window, not just the page column
+  inner.style.setProperty('--cw', Math.max(150, Math.min(230, Math.floor((avail - (cols.length - 1) * 36) / cols.length))) + 'px');
+  inner.style.gridTemplateColumns = `repeat(${cols.length}, var(--cw))`;
+  inner.append(sv);
+  const head = c => c === 'in' ? 'Comes in' : c === 'start' ? 'Starts' : c === 'out' ? 'Goes out' : LK[c].name;
+  cols.forEach((c, i) => inner.append(el('div', {class:'lhead', style:`grid-row:1;grid-column:${i + 1}`}, head(c))));
+  rows.forEach((r, ri) => cols.forEach((c, ci) => inner.append(el('div', {class:'lcell', style:`grid-row:${ri + 2};grid-column:${ci + 1}`},
+    r === -1 && c === 'start' ? el('div', {class:'lname'}, 'Used by more than one program') : null,
+    (cell[r + '|' + c] || []).sort((a, b) => (rank[a] ?? -1) - (rank[b] ?? -1)).map(id => cards[id])))));
+  wire(inner, sv, cards, edges);
+  return el('div', {class:'graph wide'}, inner);
 }
 function flowView(i) {
   const all = D.flow.processes, F = all[i] || all[0], f = document.createDocumentFragment();
-  f.append(el('section', {class:'intro'},
-    el('h1', {}, 'How it runs'),
+  shownRun = all.indexOf(F);
+  f.append(el('section', {class:'intro'}, el('h1', {}, 'How it runs')));
+  if (D.flow.map.parts.some(id => N[id])) {
+    f.append(sec('The map', 'The whole codebase in one picture. One row per program, then a row for parts several programs use. Columns run from what comes in, through where the program starts and each layer, to what goes out. Solid lines run from a part to the parts it calls; dashed lines are parts the framework loads or that are imported but not called. Hover a box to follow its lines. Click a part to open it, or a program to follow its steps below.'));
+    f.append(lanes());
+  }
+  f.append(el('section', {class:'intro', style:'margin-top:28px'},
     all.length > 1 ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Programs'),
       all.map((P, j) => el('button', {class:'ref', style:'--c:var(--ink)', 'aria-current': P === F ? 'true' : null, onclick:() => go('@flow/' + j)}, el('i'), P.name))) : null,
     el('p', {class:'lead'}, F.narrative),
@@ -545,11 +604,7 @@ function flowView(i) {
       F.entries.map(id => ref(id))),
     ioRow('Takes in', Object.keys(F.io || {}), 'in', F.io), ioRow('Gives out', Object.keys(F.io || {}), 'out', F.io),
     F.parts.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Passes through'), chips(F.parts, 16)) : null));
-  if (F.parts.some(id => N[id])) {
-    f.append(sec('The map', 'What comes in on the left, what goes out on the right. Lines run from a part to the parts it calls. An input or output box links only to the parts of the first four files that use it. Click a part to open it.'));
-    f.append(...systemMap(F).filter(Boolean));
-  }
-  f.append(sec('Step by step', 'One line per step, in the order the code runs. Indented steps happen inside the step above. Click a name to open its file.'));
+  f.append(sec('Step by step' + (all.length > 1 ? ': ' + F.name : ''), 'One line per step, in the order the code runs. Indented steps happen inside the step above. Click a name to open its file.'));
   f.append(outline(F.steps, 3, 's'));
   if (F.routes.length) {
     f.append(sec('Web requests', 'What happens when each kind of request arrives. Click one to follow it.'));

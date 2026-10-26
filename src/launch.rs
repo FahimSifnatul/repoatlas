@@ -604,7 +604,7 @@ fn spawned(files: &[File], find: &Finder, where_: &Where) -> Vec<Launch> {
                 }
                 let before = &f.bare[from..at];
                 let key = KEY.captures_iter(before).last().map(|c| c[1].to_string());
-                let name = key.unwrap_or_else(|| s.split_whitespace().find(|w| !WRAPPERS.contains(w)).unwrap_or("").to_string());
+                let name = key.unwrap_or_else(|| s.split_whitespace().map(|w| w.trim_matches(['"', '\''])).find(|w| !WRAPPERS.contains(w)).unwrap_or("").to_string());
                 out.push(Launch { name, cmd: s, file: f.path.clone(), cwd: cwd.clone(), targets: dedup(hits), rank: -1, ..Default::default() });
             }
         }

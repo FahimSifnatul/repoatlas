@@ -108,8 +108,13 @@ impl Finder {
     /// 'a.b.C' -> the file of module a/b/C, else a/b ('order.Order' is a model name, not the order package).
     /// bare: d is the folder a command runs in, and only a module right there counts (celery -A proj).
     pub fn module(&self, name: &str, d: &str, bare: bool) -> Option<String> {
+        self.module_from(name, d, bare, if bare { 0 } else { 1 })
+    }
+
+    /// low: how many leading segments must stay. 1 for a dotted name found anywhere (`order.Order` is a model, not
+    /// the order package); 0 where the command says it is a module (`app:app`, `celery -A proj`, `python -m pkg`).
+    fn module_from(&self, name: &str, d: &str, bare: bool, low: usize) -> Option<String> {
         let parts: Vec<&str> = name.split('.').collect();
-        let low = if bare { 0 } else { 1 };
         let mut k = parts.len();
         while k > low {
             let m = parts[..k].join("/");
@@ -159,8 +164,11 @@ impl Finder {
         static PLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*$").unwrap());
         let head = REDIRECT.split(cmd).next().unwrap_or("");
         let mut out = vec![];
+        let mut prev = "";
         for m in WORD.find_iter(head) {
             let mut w = m.as_str().to_string();
+            let named_module = w.contains(':') || matches!(prev, "-A" | "--app" | "-m" | "--module" | "--application");
+            prev = m.as_str();
             if w.starts_with('-') || w.starts_with('$') {
                 continue;
             }
@@ -180,6 +188,8 @@ impl Finder {
                 .filter(|e| self.paths.get(e).is_some_and(|v| v.contains(e))) // artisan, bin/www: a file named exactly
                 .or_else(|| if w.contains(['/', '.']) { self.path(&w, d) } else { None })
                 .or_else(|| if MODULE.is_match(&module) { self.module(&module, d, false) } else { None })
+                // gunicorn app:app, celery --app=celery_app.app, python -m pkg: the command says it is a module
+                .or_else(|| if named_module && (MODULE.is_match(&module) || PLAIN.is_match(&module)) { self.module_from(&module, d, false, 0) } else { None })
                 .or_else(|| if bare && PLAIN.is_match(&w) { self.module(&w, d, true) } else { None });
             if let Some(h) = hit {
                 out.push(h);
