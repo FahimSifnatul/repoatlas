@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Lint the shell scripts
-        run: shellcheck -s sh install.sh scripts/*.sh
+        run: shellcheck -s sh install.sh
       - name: Installer tests
         run: python -m unittest tests/test_install.py -v
       - name: Install from this checkout, as a user would

@@ -10,7 +10,7 @@ cargo run --release -- .                      # run it on itself
 cargo test                                    # the fixture repositories and the command
 cargo clippy --all-targets -- -D warnings     # CI fails on any warning
 python3 -m unittest tests/test_install.py     # the installer, if you touched install.sh
-shellcheck -s sh install.sh scripts/*.sh      # lint the shell scripts, if you touched them
+shellcheck -s sh install.sh                   # lint the installer, if you touched it
 ```
 
 ## Layout
@@ -33,11 +33,8 @@ src/
   viewer.html               the interactive page (plain CSS and JS, no build step)
 tests/fixtures.rs           a small repository per case, and the command
 tests/test_install.py       the installer
-examples/                   dump.rs (print a syntax tree), calls.rs (print what each call resolves to)
+examples/                   dump.rs (print a syntax tree), calls.rs (print what each call resolves to), sample output
 install.sh                  the one-line installer
-scripts/                    personalize.sh, update_formula.sh
-packaging/homebrew/         the Homebrew formula
-docs/                       screenshots and a finished example
 ```
 
 Only `lang.rs`, `queries/` and `resolve.rs` know about particular languages. The rest works the same for every
@@ -73,4 +70,9 @@ knowledge lives only in data tables (`EXT_CATS` in `tables.rs`), and a test chec
 
 * Output must stay deterministic: iterate sorted maps, or sort anything that comes out of a hash set.
 * No step may guess: a call no rule can place is left out, and a program no launch file or entry rule names is not invented.
-* Shell scripts must stay POSIX `sh` and pass `shellcheck`.
+* `install.sh` must stay POSIX `sh` and pass `shellcheck`.
+
+## Releasing
+
+Bump `version` in `Cargo.toml` and push to `master`. `.github/workflows/release.yml` tags `vX.Y.Z`, builds and tests
+each platform, and publishes the binaries with their `.sha256` files, which `install.sh` downloads.

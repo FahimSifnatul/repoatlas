@@ -21,7 +21,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / "install.sh"
 VERSION = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
-PLACEHOLDER = "YOUR_GITHUB_" + "USER"        # split, so personalize.sh does not rewrite this test
 SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 CARGO = shutil.which("cargo")
 REAL_HOME = Path.home()
@@ -257,58 +256,6 @@ class Uninstall(Sandbox):
         r = self.run_install("--uninstall")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not installed", r.stderr)
-
-
-
-class Helpers(Sandbox):
-    """personalize.sh / update_formula.sh, tested on a miniature template so the result does not depend on
-    whether *this* repository has already been personalized."""
-
-    def template(self):
-        t = self.tmp / "template"
-        (t / "scripts").mkdir(parents=True)
-        (t / "packaging/homebrew/Formula").mkdir(parents=True)
-        for name in ("personalize.sh", "update_formula.sh"):
-            shutil.copy(ROOT / "scripts" / name, t / "scripts" / name)
-        (t / "install.sh").write_text(f'REPO="{PLACEHOLDER}/repoatlas"\n')
-        (t / "README.md").write_text(f"curl https://raw.githubusercontent.com/{PLACEHOLDER}/repoatlas/main/install.sh | sh\n")
-        (t / "packaging/homebrew/Formula/repoatlas.rb").write_text(
-            f'class Repoatlas < Formula\n  homepage "https://github.com/{PLACEHOLDER}/repoatlas"\n'
-            '  url "https://example.invalid/old.tar.gz"\n  sha256 "REPLACE_WITH_SHA256"\nend\n')
-        return t
-
-    def test_personalize_replaces_every_placeholder_and_only_those(self):
-        t = self.template()
-        script_before = (t / "scripts/personalize.sh").read_text()
-        r = subprocess.run(["sh", str(t / "scripts/personalize.sh"), "octocat"], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("3 files", r.stdout)
-        for f in ("install.sh", "README.md", "packaging/homebrew/Formula/repoatlas.rb"):
-            text = (t / f).read_text()
-            self.assertNotIn(PLACEHOLDER, text, f)
-            self.assertIn("octocat/repoatlas", text, f)
-        self.assertEqual((t / "scripts/personalize.sh").read_text(), script_before)     # did not rewrite itself
-        bad = subprocess.run(["sh", str(t / "scripts/personalize.sh"), "bad name!"], capture_output=True, text=True)
-        self.assertNotEqual(bad.returncode, 0)
-
-    def test_update_formula_fills_url_and_checksum(self):
-        t = self.template()
-        subprocess.run(["sh", str(t / "scripts/personalize.sh"), "octocat"], check=True, capture_output=True)
-        tarball = self.tmp / "v1.0.0.tar.gz"
-        tarball.write_bytes(b"pretend this is the release tarball")
-        r = subprocess.run(["sh", str(t / "scripts/update_formula.sh"), "v1.0.0"], capture_output=True, text=True,
-                           env=self.env(REPOATLAS_TARBALL_URL=tarball.as_uri()))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        formula = (t / "packaging/homebrew/Formula/repoatlas.rb").read_text()
-        self.assertIn(f'sha256 "{hashlib.sha256(tarball.read_bytes()).hexdigest()}"', formula)
-        self.assertIn(f'url "{tarball.as_uri()}"', formula)
-        self.assertNotIn("REPLACE_WITH", formula)
-
-    def test_update_formula_asks_to_personalize_first(self):
-        t = self.template()
-        r = subprocess.run(["sh", str(t / "scripts/update_formula.sh"), "v1.0.0"], capture_output=True, text=True, env=self.env())
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("personalize.sh", r.stderr)
 
 
 if __name__ == "__main__":
