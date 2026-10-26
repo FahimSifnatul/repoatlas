@@ -143,8 +143,15 @@ impl Project {
             Resolver::Jvm => self.resolve_jvm(f),
             Resolver::Php => self.resolve_php(f),
             Resolver::C => self.resolve_c(f),
-            Resolver::None => Default::default(),
+            Resolver::None => self.resolve_listed(f),
         }
+    }
+
+    /// A language with no resolver: its imports reach no file, but one that names a known library is an outside library.
+    fn resolve_listed(&self, f: &File) -> Uses {
+        let ext = f.imports.iter().filter(|i| crate::tables::cat_of(i).is_some())
+            .map(|i| (i.rsplit(['.', '/']).next().unwrap_or(i).to_string(), i.clone())).collect();
+        (BTreeSet::new(), ext)
     }
 
     /// Local names that stand for a whole file of the repo: `import routes from './routes'`.
@@ -352,7 +359,7 @@ impl Project {
 
     /// './a' -> a.ts / a.js / a/index.js ...; also './a.js' written for an a.ts source.
     fn js_file(&self, base: &str) -> Option<String> {
-        const EXTS: &[&str] = &["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte"];
+        const EXTS: &[&str] = &["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte"];
         static JS_EXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.*)\.(?:m|c)?jsx?$").unwrap());
         let base = base.trim_matches('/');
         let mut cands = vec![base.to_string()];

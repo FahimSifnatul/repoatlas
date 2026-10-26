@@ -111,6 +111,8 @@ pub struct Index {
     pub exported: Vec<(String, String, usize)>,
     /// ... and (file, class it declares that extends a handle type, ORM)
     pub derived: Vec<(String, String, usize)>,
+    /// where names are visible without an import: classes that extend a handle type (`class AppDbContext : DbContext`), and the ORM
+    pub derived_types: Vec<(String, usize)>,
 }
 
 pub fn index(files: &[File]) -> Index {
@@ -156,7 +158,15 @@ pub fn index(files: &[File]) -> Index {
             }
         }
     }
-    Index { models: models(files), getters, names, exported, derived }
+    let mut derived_types = vec![];
+    for f in files.iter().filter(|f| f.lang.scope != crate::lang::Scope::Imports) {
+        for (oi, o) in mine(f) {
+            derived_types.extend(f.defs.iter().filter(|d| d.kind == Kind::Class && d.bases.iter().any(|b| o.handles.contains(&last_segment(b)))).map(|d| (d.name.clone(), oi)));
+        }
+    }
+    derived_types.sort();
+    derived_types.dedup();
+    Index { models: models(files), getters, names, exported, derived, derived_types }
 }
 
 /// the names that hold a session in this file: its own, and those declared elsewhere for an ORM it is written for
@@ -164,6 +174,10 @@ pub fn sessions(f: &File, ix: &Index) -> Vec<(String, usize)> {
     let mut out = handles(f, &ix.getters);
     let mine: Vec<usize> = mine(f).into_iter().map(|(oi, _)| oi).collect();
     out.extend(ix.names.iter().filter(|(_, oi)| mine.contains(oi)).cloned());
+    // a type the repo derives from a handle type is a handle wherever it is declared, with no import to say so
+    for (ty, oi) in ix.derived_types.iter().filter(|(_, oi)| orm_speaks(ORMS[*oi].lang, f.lang.name)) {
+        out.extend(typed(f, &ORMS[*oi], ty).into_iter().map(|n| (n, *oi)));
+    }
     // `import { prisma } from './lib/prisma'`, `constructor(private prisma: PrismaService)` with PrismaService imported:
     // the name, imported from the file that declares it, is the handle declared there
     if ORM_IMPORTED_HANDLE_LANGS.contains(&f.lang.name) {
@@ -193,7 +207,11 @@ fn typed(f: &File, o: &Orm, ty: &str) -> Vec<String> {
         format!(r"(\$?\w+)\s+\*?(?:\w+\.)*{ty}\b"),
         format!(r"\b{ty}\s+(\$\w+)"),
         format!(r"(\$?\w+)\s*:?=\s*{new_kw}(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
+        // `EntityManager em;` `DbContext db)`: the type, then the name
+        format!(r"\b{ty}(?:<[^<>]*>)?\s+(\w+)\s*[;=,)]"),
     ];
+    // a language that writes the type first has no `name Type` declaration: `private DbContext` is not a name
+    let forms = forms.into_iter().enumerate().filter(|(i, _)| if f.lang.type_first { *i != 1 } else { *i != 4 }).map(|(_, r)| r);
     // `http: reqwest::Client`: a type named through a crate path is this ORM's only when the crate is
     // or wraps its handle (`r2d2::Pool`); a path inside the project, `crate::db::Pool`, says nothing either way
     let own_crate = |q: &str| {

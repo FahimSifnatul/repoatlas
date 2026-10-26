@@ -2404,3 +2404,88 @@ fn a_job_queue_worker_does_not_read_the_routes() {
     let routes = |name: &str| proc_named(&d, name)["routes"].as_array().unwrap().len();
     assert_eq!((routes("web"), routes("worker")), (1, 0));
 }
+
+// ---------------------------------------------------------------- languages beyond the first few
+
+#[test]
+fn minimal_api_groups_and_top_level_program() {
+    // no Main(): the file is named Program; MapGroup sets the prefix of the Map calls on it
+    let d = analyze(&[(
+        "Program.cs",
+        "var app = WebApplication.CreateBuilder(args).Build();\nvar api = app.MapGroup(\"/api\");\napi.MapGet(\"/users\", ListUsers);\napp.MapPost(\"/login\", Login);\napp.Run();\n\nstatic string ListUsers() => \"x\";\nstatic string Login() => \"y\";\n",
+    )]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/users", "POST /login"]);
+}
+
+#[test]
+fn attribute_routes_with_a_class_prefix_and_bare_verbs() {
+    let d = analyze(&[
+        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapControllers();\nvar users = new UsersController();\napp.Run();\n"),
+        ("Controllers/UsersController.cs", "[ApiController]\n[Route(\"api/users\")]\npublic class UsersController {\n    [HttpGet]\n    public string List() { return \"\"; }\n\n    [HttpPost(\"{id}\")]\n    public string Save() { return \"\"; }\n}\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/users", "POST /api/users/{id}"]);
+}
+
+#[test]
+fn spring_bare_mapping_answers_at_the_class_prefix() {
+    let d = analyze(&[
+        ("src/App.java", "@SpringBootApplication\npublic class App {\n    void main(String[] a) { SpringApplication.run(App.class, a); }\n}\n"),
+        ("src/UserController.java", "@RestController\n@RequestMapping(\"/api/users\")\npublic class UserController {\n    @GetMapping\n    public String list() { return \"\"; }\n\n    @PostMapping(\"/new\")\n    public String create() { return \"\"; }\n}\n"),
+    ]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /api/users", "POST /api/users/new"]);
+}
+
+#[test]
+fn routes_written_without_parentheses() {
+    let d = analyze(&[("app.rb", "require 'sinatra'\n\nget '/hello' do\n  greet\nend\n\ndef greet\n  'hi'\nend\n")]);
+    assert_eq!(route_paths(&procs(&d)[0]), ["GET /hello"]);
+}
+
+#[test]
+fn a_context_class_of_the_repo_is_a_database_handle_where_it_is_used() {
+    let d = analyze(&[
+        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/users\", UserApi.List);\napp.Run();\n"),
+        ("AppDbContext.cs", "using Microsoft.EntityFrameworkCore;\n\npublic class AppDbContext : DbContext {\n    public DbSet<User> Users { get; set; }\n}\n"),
+        ("UserApi.cs", "public class UserApi {\n    private readonly AppDbContext _db;\n\n    public static string List(AppDbContext db) {\n        db.Users.ToList();\n        db.SaveChanges();\n        return \"\";\n    }\n}\n"),
+    ]);
+    assert_eq!(db_steps(&d, "/users"), ["reads database", "writes database"]);
+}
+
+#[test]
+fn jpa_entity_manager_declared_type_first() {
+    let d = analyze(&[(
+        "src/Repo.java",
+        "import jakarta.persistence.EntityManager;\nimport jakarta.persistence.Entity;\n\n@Entity\nclass Order {}\n\npublic class Repo {\n    private EntityManager em;\n\n    public static void main(String[] a) { new Repo().save(); }\n\n    void save() {\n        em.persist(new Order());\n        em.find(Order.class, 1);\n    }\n}\n",
+    )]);
+    assert_eq!(db_steps(&d, ""), ["writes Order", "reads Order"]);
+}
+
+#[test]
+fn active_record_models_read_and_write() {
+    let d = analyze(&[
+        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+        ("app.rb", "require 'sinatra'\n\nget '/users' do\n  list\nend\n\ndef list\n  User.where(active: true).first\n  User.create(name: 'x')\nend\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["reads User", "writes User"]);
+}
+
+#[test]
+fn imports_of_known_libraries_in_languages_without_a_resolver() {
+    let d = analyze(&[
+        ("Program.cs", "using System;\nusing Microsoft.EntityFrameworkCore;\nusing MyApp.Models;\n\nclass P { static void Main() { } }\n"),
+        ("app.rb", "require 'sidekiq'\nrequire 'json'\n\ndef run; end\n"),
+    ]);
+    assert_eq!(strs(&d["nodes"]["Program.cs"]["ext"]), ["EntityFrameworkCore"]);
+    assert_eq!(strs(&d["nodes"]["app.rb"]["ext"]), ["sidekiq"]);
+}
+
+#[test]
+fn module_typescript_and_newer_entry_forms() {
+    let d = analyze(&[
+        ("lib/util.mts", "export function util() { return 1 }\n"),
+        ("src/Main.scala", "@main def run(): Unit = println(1)\n"),
+    ]);
+    assert!(d["nodes"].get("lib/util.mts").is_some());
+    assert!(d["nodes"]["src/Main.scala"]["entry"].as_bool().unwrap());
+    assert!(!procs(&d).is_empty());
+}

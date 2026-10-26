@@ -63,6 +63,10 @@ pub struct Lang {
     pub script_blocks: bool,
     /// every file of a folder loads together: reaching one runs the top level of all (Go package variables and `init()`)
     pub package_loads: bool,
+    /// a declaration writes the type before the name: `EntityManager em;` (Java, C#, C, C++)
+    pub type_first: bool,
+    /// for a language with no resolver: patterns whose first group is an imported module (`using X.Y;`)
+    pub import_specs: &'static [&'static str],
 }
 
 const BASE: Lang = Lang {
@@ -85,6 +89,8 @@ const BASE: Lang = Lang {
     implicit_this: false,
     script_blocks: false,
     package_loads: false,
+    type_first: false,
+    import_specs: &[],
 };
 
 pub static LANGS: &[Lang] = &[
@@ -95,7 +101,7 @@ pub static LANGS: &[Lang] = &[
     Lang { name: "JavaScript", exts: &[".js", ".jsx", ".mjs", ".cjs"], interpreters: &["node", "nodejs", "bun", "deno"],
            color: "#d9b611", manifests: &["package.json"], grammar: Some("javascript"), scope: Scope::Imports,
            resolver: Resolver::Js, ..BASE },
-    Lang { name: "TypeScript", exts: &[".ts", ".tsx"], color: "#3178c6", skip_suffixes: &[".d.ts"], grammar: Some("typescript"),
+    Lang { name: "TypeScript", exts: &[".ts", ".tsx", ".mts", ".cts"], color: "#3178c6", skip_suffixes: &[".d.ts"], grammar: Some("typescript"),
            scope: Scope::Imports, resolver: Resolver::Js, ..BASE },
     Lang { name: "Vue", exts: &[".vue"], color: "#41b883", grammar: Some("javascript"), entry_by_name: false,
            default_layer: Some("interface"), scope: Scope::Imports, resolver: Resolver::Js, script_blocks: true, ..BASE },
@@ -106,27 +112,29 @@ pub static LANGS: &[Lang] = &[
     Lang { name: "Rust", exts: &[".rs"], color: "#b7603c", manifests: &["Cargo.toml"], grammar: Some("rust"),
            entry_re: &[r"(?m)^\s*fn\s+main\s*\("], scope: Scope::Imports, resolver: Resolver::Rust, ..BASE },
     Lang { name: "Java", exts: &[".java"], color: "#b07219", grammar: Some("java"),
-           entry_re: &[r"static\s+void\s+main\s*\(|@SpringBootApplication"], scope: Scope::Folder, resolver: Resolver::Jvm,
-           implicit_this: true, ..BASE },
+           entry_re: &[r"\bvoid\s+main\s*\(|@SpringBootApplication"], scope: Scope::Folder, resolver: Resolver::Jvm,
+           implicit_this: true, type_first: true, ..BASE },
     Lang { name: "Kotlin", exts: &[".kt"], color: "#A97BFF", grammar: Some("kotlin"),
-           entry_re: &[r"(?m)^fun\s+main\s*\(|@SpringBootApplication"], scope: Scope::Folder, resolver: Resolver::Jvm,
+           entry_re: &[r"(?m)^\s*fun\s+main\s*\(|@SpringBootApplication"], scope: Scope::Folder, resolver: Resolver::Jvm,
            implicit_this: true, ..BASE },
     Lang { name: "C", exts: &[".c", ".h"], color: "#555555", grammar: Some("c"), entry_re: &[r"\bint\s+main\s*\("],
-           resolver: Resolver::C, ..BASE },
-    Lang { name: "C++", exts: &[".cpp", ".cc", ".hpp"], color: "#f34b7d", grammar: Some("cpp"), entry_re: &[r"\bint\s+main\s*\("],
-           resolver: Resolver::C, implicit_this: true, ..BASE },
+           resolver: Resolver::C, type_first: true, ..BASE },
+    Lang { name: "C++", exts: &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"], color: "#f34b7d", grammar: Some("cpp"), entry_re: &[r"\bint\s+main\s*\("],
+           resolver: Resolver::C, implicit_this: true, type_first: true, ..BASE },
     Lang { name: "C#", exts: &[".cs"], color: "#178600", grammar: Some("csharp"),
-           entry_re: &[r"\bstatic\s+(?:async\s+)?[\w<>]+\s+Main\s*\("], implicit_this: true, ..BASE },
+           entry_re: &[r"\bstatic\s+(?:async\s+)?[\w<>]+\s+Main\s*\("], implicit_this: true, type_first: true,
+           import_specs: &[r"(?m)^\s*(?:global\s+)?using\s+(?:static\s+)?([\w.]+)\s*;"], ..BASE },
     // .ru: the Rack file a Ruby web server boots
     Lang { name: "Ruby", exts: &[".rb", ".ru", ".rake"], interpreters: &["ruby"], color: "#701516", grammar: Some("ruby"),
            entry_re: &[r"(?m)^if\s+(?:__FILE__\s*==\s*\$(?:0|PROGRAM_NAME)|\$(?:0|PROGRAM_NAME)\s*==\s*__FILE__)"],
-           implicit_this: true, ..BASE },
+           implicit_this: true, import_specs: &[r#"(?m)^\s*require\s+['"]([\w/-]+)['"]"#], ..BASE },
     Lang { name: "PHP", exts: &[".php"], interpreters: &["php"], color: "#4F5D95", manifests: &["composer.json"], grammar: Some("php"),
            resolver: Resolver::Php, ..BASE },
     Lang { name: "Swift", exts: &[".swift"], color: "#F05138", grammar: Some("swift"), entry_re: &[r"(?m)^\s*@main\b"],
-           implicit_this: true, ..BASE },
+           implicit_this: true, import_specs: &[r"(?m)^\s*(?:@\w+\s+)?import\s+(?:\w+\s+)?([\w.]+)"], ..BASE },
     Lang { name: "Scala", exts: &[".scala"], color: "#c22d40", grammar: Some("scala"),
-           entry_re: &[r"\bdef\s+main\s*\(|\bextends\s+App\b"], implicit_this: true, ..BASE },
+           entry_re: &[r"\bdef\s+main\s*\(|\bextends\s+App\b|@main\b"], implicit_this: true,
+           import_specs: &[r"(?m)^\s*import\s+([\w.]+)"], ..BASE },
     // other scripts are named by path, which the core follows
     Lang { name: "Shell", exts: &[".sh", ".bash", ".zsh"], interpreters: &["sh", "bash", "zsh", "dash", "ash"], color: "#89e051",
            grammar: Some("bash"), scope: Scope::Imports, ..BASE },

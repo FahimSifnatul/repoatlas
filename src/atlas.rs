@@ -247,7 +247,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             let named: Vec<&String> = inside.iter().copied()
                 .filter(|q| {
                     let f = &files[ix[*q]];
-                    ENTRY_STEMS.contains(&stem(q)) && f.lang.entry_by_name && !users.contains(&(f.lang.name, *q))
+                    ENTRY_STEMS.contains(&stem(q).to_lowercase().as_str()) && f.lang.entry_by_name && !users.contains(&(f.lang.name, *q))
                         && q[d.len()..].trim_matches('/').matches('/').count() <= 2
                 })
                 .collect();
@@ -282,7 +282,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             0
         } else if f.entry {
             1
-        } else if ENTRY_STEMS.contains(&stem(&f.path)) && f.path.matches('/').count() <= 2 && f.lang.entry_by_name && !imported.contains(&f.path) {
+        } else if ENTRY_STEMS.contains(&stem(&f.path).to_lowercase().as_str()) && f.path.matches('/').count() <= 2 && f.lang.entry_by_name && !imported.contains(&f.path) {
             2
         } else {
             continue;

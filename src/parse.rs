@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
-use crate::rules::{routes_file, BARE_VERB_DECORATOR, BARE_VERB_DECORATOR_LANGS, NAMED_ROUTE_ARGS, NAMED_ROUTE_CALLS, ROUTE_TABLES, ROUTE_TABLE_ENTRY, VIEW_ROUTE_NAME, VIEW_VERB, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES};
+use crate::rules::{routes_file, BARE_VERB_DECORATOR, BARE_VERB_DECORATOR_LANGS, NAMED_ROUTE_ARGS, NAMED_ROUTE_CALLS, ROUTE_TABLES, ROUTE_TABLE_ENTRY, VIEW_ROUTE_NAME, VIEW_VERB, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES, ROUTE_VERB_PREFIXES};
 use crate::tables::{COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
@@ -454,7 +454,7 @@ fn bare_verb_decorator(lang: &str, head: &str) -> Option<(String, String)> {
     if !BARE_VERB_DECORATOR_LANGS.contains(&lang) {
         return None;
     }
-    BARE_VERB_DECORATOR.captures(head).map(|c| (c[1].to_uppercase(), String::new()))
+    BARE_VERB_DECORATOR.captures(head).and_then(|c| (1..=3).find_map(|i| c.get(i))).map(|m| (m.as_str().to_uppercase(), String::new()))
 }
 
 /// The object a decorator route is registered on: `@router.get("/x")` -> router, `@app.route(..)` -> app
@@ -762,14 +762,14 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
             || recv.is_empty() && ROUTE_BARE.contains(&name.as_str())
             || in_routes_file.is_some_and(|calls| calls.contains(&name.as_str()))
             || on_chain.is_some() && chain.is_some_and(|ch| ch.routes.contains(&name.as_str())) {
-            static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
-            static FIRST_ANY: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(\s*r?['"`](?:([A-Z]+)\s+)?([^'"`]*)['"`]"#));
+            static FIRST: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(?\s*['"`](?:([A-Z]+)\s+)?(/[^'"`]*)['"`]"#));
+            static FIRST_ANY: LazyLock<Regex> = LazyLock::new(|| rx(r#"^\s*\(?\s*r?['"`](?:([A-Z]+)\s+)?([^'"`]*)['"`]"#));
             let re = if in_routes_file.is_some() || on_chain.is_some() { &FIRST_ANY } else { &FIRST };
             let written = &src[callee.end_byte()..node.end_byte()];
             let swapped = crate::rules::handler_first_call(f.lang.name, &name).then(|| handler_first(written)).flatten();
             let text: &str = swapped.as_deref().unwrap_or(written);
             if let Some(c) = re.captures(text) {
-                let upper = name.trim_start_matches("add_").to_uppercase();
+                let upper = ROUTE_VERB_PREFIXES.iter().find_map(|p| name.strip_prefix(p)).unwrap_or(&name).to_uppercase();
                 let verb = match c.get(1) {
                     Some(v) => v.as_str().to_string(), // "GET /users/{id}": the verb is written in the pattern
                     None if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&upper.as_str()) => upper,
@@ -997,6 +997,9 @@ fn imports(f: &mut File) {
             f.aliases = f.imports.iter().map(|i| i.rsplit('\\').next().unwrap_or("").to_string()).collect();
         }
         Resolver::C => f.imports = C_INCLUDE.captures_iter(t).map(|c| c[1].to_string()).collect(),
+        Resolver::None if !f.lang.import_specs.is_empty() => {
+            f.imports = f.lang.import_specs.iter().flat_map(|p| Regex::new(p).unwrap().captures_iter(t).map(|c| c[1].to_string()).collect::<Vec<_>>()).collect();
+        }
         Resolver::None => {}
     }
 }

@@ -82,7 +82,9 @@ pub const EXT_CATS: &[(&str, &str, &str)] = &[
         github.com/labstack/echo github.com/gofiber/fiber net/http org.springframework.web \
         github.com/beego/beego github.com/astaxie/beego github.com/kataras/iris github.com/cloudwego/hertz \
         org.springframework.boot actix_web axum rocket warp djangorestframework rest_framework litestar poem \
-        falcon pyramid quart ninja django-ninja salvo tide loco-rs loco_rs hono @koa/router"),
+        falcon pyramid quart ninja django-ninja salvo tide loco-rs loco_rs hono @koa/router \
+        microsoft.aspnetcore grape roda vapor hummingbird akka.http akka-http play.api http4s io.quarkus quarkus io.micronaut micronaut \
+        jakarta.ws.rs javax.ws.rs io.ktor.server"),
     ("db", "Database", "sqlalchemy sqlmodel alembic psycopg2 psycopg asyncpg pymysql pymongo motor peewee tortoise sqlite3 mongoose \
         mongodb sequelize typeorm prisma @prisma/client knex pg mysql mysql2 better-sqlite3 redis ioredis \
         gorm.io/gorm github.com/jmoiron/sqlx database/sql github.com/redis/go-redis github.com/lib/pq \
@@ -90,13 +92,14 @@ pub const EXT_CATS: &[(&str, &str, &str)] = &[
         diesel sqlx rusqlite elasticsearch cassandra peewee tortoise tortoise-orm pony github.com/uptrace/bun entgo.io/ent \
         sea_orm sea-orm doctrine/orm doctrine/dbal illuminate/database \
         github.com/sqlc-dev/sqlc xorm.io/xorm github.com/go-xorm/xorm github.com/beego/beego/v2/client/orm \
-        github.com/astaxie/beego/orm mongoengine beanie odmantic piccolo ormar tokio-postgres tokio_postgres rbatis drizzle-orm @mikro-orm"),
+        github.com/astaxie/beego/orm mongoengine beanie odmantic piccolo ormar tokio-postgres tokio_postgres rbatis drizzle-orm @mikro-orm \
+        microsoft.entityframeworkcore dapper npgsql activerecord sequel slick doobie org.jetbrains.exposed"),
     ("ui", "UI framework", "react react-dom vue svelte @angular/core preact solid-js lit tkinter pyqt5 pyqt6 \
         pyside2 pyside6 streamlit gradio kivy jquery @mui/material antd"),
-    ("queue", "Messaging & jobs", "celery rq dramatiq kafka confluent_kafka kafkajs amqplib pika bull bullmq nats"),
+    ("queue", "Messaging & jobs", "celery rq dramatiq kafka confluent_kafka kafkajs amqplib pika bull bullmq nats sidekiq resque masstransit"),
     ("cloud", "Cloud & SaaS", "boto3 botocore aws-sdk @aws-sdk google.cloud @google-cloud firebase firebase-admin \
         supabase azure stripe twilio sendgrid slack_sdk @slack"),
-    ("http", "HTTP clients", "requests httpx urllib3 axios node-fetch got superagent reqwest okhttp retrofit"),
+    ("http", "HTTP clients", "requests httpx urllib3 axios node-fetch got superagent reqwest okhttp retrofit faraday httparty alamofire"),
     ("ai", "AI & data science", "openai anthropic langchain transformers torch tensorflow sklearn keras numpy \
         pandas scipy xgboost"),
 ];

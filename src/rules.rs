@@ -33,7 +33,7 @@ pub fn lang_mount_call(lang: &str, name: &str) -> bool {
     LANG_MOUNT_CALLS.iter().any(|(ls, cs)| ls.contains(&lang) && cs.contains(&name))
 }
 /// calls that make a sub-router with a prefix: `v1 := r.Group("/v1")`
-pub const GROUP_CALLS: &[&str] = &["Group", "group", "Party"];
+pub const GROUP_CALLS: &[&str] = &["Group", "group", "Party", "MapGroup"];
 
 pub static ROUTE_HINT: LazyLock<Regex> = LazyLock::new(|| {
     rx(r"@(?:\w+\.)?(?:route|get|post|put|delete|patch)\(|\b(?:app|router)\.(?:get|post|put|delete|patch|use)\(|@RestController|@Controller|@(?:Get|Post|Put|Delete|Patch|Request)Mapping|HandleFunc\(|urlpatterns")
@@ -47,8 +47,8 @@ pub static ROUTE_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         rx(r#"HandleFunc\(\s*"([^"]+)""#),
     ]
 });
-/// what opens an attribute: `@` (decorators, annotations) or `#[` with an optional path (`#[actix_web::get(..)]`, `#[Route(..)]`)
-const ATTR: &str = r"(?:@|#\[\s*(?:[\w:\\]*(?:::|\\))?)";
+/// what opens an attribute: `@` (decorators, annotations), `#[` (Rust, PHP) or `[` (C#) with an optional path (`#[actix_web::get(..)]`, `[Route(..)]`)
+const ATTR: &str = r"(?:@|#?\[\s*(?:[\w:\\]*(?:::|\\))?)";
 
 /// a route written above a function: @app.get("/x"), @router.post(...), @GetMapping("/x"), [HttpGet("x")], #[get("/x")]
 pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -61,7 +61,10 @@ pub static DECORATOR_ROUTES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// call names that register a web endpoint: app.get("/x", handler), mux.HandleFunc("/x", h)
 pub const ROUTE_CALLS: &[&str] = &["get", "post", "put", "delete", "patch", "all", "any", "route", "handle", "HandleFunc", "Handle",
     "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch", "at", "add_route", "add_api_route",
-    "add_url_rule", "add_get", "add_post", "add_put", "add_delete", "add_patch", "Router"];
+    "add_url_rule", "add_get", "add_post", "add_put", "add_delete", "add_patch", "Router",
+    "MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch"];
+/// what a registering call's name starts with before the verb: `add_get`, `MapGet`
+pub const ROUTE_VERB_PREFIXES: &[&str] = &["add_", "Map"];
 /// calls that register a route, but only in files of one language: aiohttp `web.view("/orders", OrderView)`
 pub const LANG_ROUTE_CALLS: &[(&str, &str)] = &[("Python", "view")];
 /// calls that take the handler before the path: Sanic `app.add_route(handler, "/x", methods=["POST"])`
@@ -128,8 +131,11 @@ pub fn method_verb(lang: &str, name: &str) -> Option<&'static str> {
 }
 
 /// languages where a verb decorator may name no path, and then answers at its class prefix: NestJS `@Post()`
-pub const BARE_VERB_DECORATOR_LANGS: &[&str] = JS_TS;
-pub static BARE_VERB_DECORATOR: LazyLock<Regex> = LazyLock::new(|| rx(r"@(Get|Post|Put|Delete|Patch)\(\s*\)"));
+pub const BARE_VERB_DECORATOR_LANGS: &[&str] = &["JavaScript", "TypeScript", "Java", "Kotlin", "C#"];
+/// `@Post()`, `@GetMapping` alone on its line, `[HttpGet]`: the verb is group 1, 2 or 3
+pub static BARE_VERB_DECORATOR: LazyLock<Regex> = LazyLock::new(|| {
+    rx(r"(?m)@(Get|Post|Put|Delete|Patch)\(\s*\)|@(Get|Post|Put|Delete|Patch)Mapping[ \t]*(?:\(\s*\))?[ \t]*$|\[Http(Get|Post|Put|Delete|Patch)(?:\(\s*\))?\]")
+});
 
 /// calls whose argument is a list of (path, handler) pairs, by language: Tornado `Application([(r"/x", Handler)])`
 pub const ROUTE_TABLES: &[(&str, &str)] = &[("Python", "Application")];
@@ -189,6 +195,7 @@ pub static CLASS_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 pub const ROUTE_FILES: &[(&str, &str, &[&str])] = &[
     ("", "urls.py", &["path", "re_path", "url"]),
     ("routes/", ".php", &[]),
+    ("config/", "routes.rb", &[]),
 ];
 
 /// Files whose place in the tree is the route they answer (Next.js `pages/api/users/[id].ts`, `app/api/users/[id]/route.ts`).
@@ -430,10 +437,24 @@ pub static ORMS: &[Orm] = &[
     Orm { name: "MikroORM", lang: "JavaScript", libs: &["@mikro-orm"], model_bases: &[], model_attrs: &["@Entity"], handles: &["EntityManager"],
           reads: &["find", "findOne", "count"], writes: &["persist", "persistAndFlush", "remove", "flush", "nativeInsert", "nativeUpdate", "nativeDelete"],
           read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    Orm { name: "JPA", lang: "Java", libs: &["jakarta.persistence", "javax.persistence", "org.hibernate"], model_bases: &[], model_attrs: &["@Entity"],
+          handles: &["EntityManager", "Session"],
+          reads: &["find", "createQuery", "createNativeQuery", "getResultList", "getSingleResult", "getReference"],
+          writes: &["persist", "merge", "remove", "flush"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    // models are plain classes; the context is declared in the repo and extends the handle type (`class AppDbContext : DbContext`)
+    Orm { name: "Entity Framework", lang: "C#", libs: &["Microsoft.EntityFrameworkCore"], model_bases: &[], model_attrs: &[], handles: &["DbContext"],
+          reads: &["Find", "FindAsync", "ToList", "ToListAsync", "FirstOrDefault", "FirstOrDefaultAsync", "SingleOrDefault", "SingleOrDefaultAsync",
+                   "Any", "AnyAsync", "Count", "CountAsync", "FromSqlRaw"],
+          writes: &["Add", "AddAsync", "AddRange", "Update", "Remove", "RemoveRange", "SaveChanges", "SaveChangesAsync", "ExecuteSqlRaw",
+                    "ExecuteUpdate", "ExecuteDelete"], read_prefixes: &[], write_prefixes: &[], pools: &[] },
+    Orm { name: "ActiveRecord", lang: "Ruby", libs: &["ApplicationRecord", "ActiveRecord"], model_bases: &["ApplicationRecord", "Base"], model_attrs: &[], handles: &[],
+          reads: &["find", "find_by", "where", "all", "first", "last", "pluck", "count", "includes", "joins", "order", "exists?"],
+          writes: &["create", "create!", "save", "save!", "update", "update!", "destroy", "delete", "update_all", "destroy_all", "delete_all", "insert_all", "upsert_all"],
+          read_prefixes: &[], write_prefixes: &[], pools: &[] },
 ];
 
 /// an ORM written for the first language is used from files of the second too
-pub const ORM_LANGS_ALSO: &[(&str, &str)] = &[("JavaScript", "TypeScript")];
+pub const ORM_LANGS_ALSO: &[(&str, &str)] = &[("JavaScript", "TypeScript"), ("Java", "Kotlin")];
 
 /// whether an ORM written for `orm` is used from files of language `file`
 pub fn orm_speaks(orm: &str, file: &str) -> bool {
