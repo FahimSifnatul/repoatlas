@@ -64,7 +64,7 @@ pub fn link(files: &[File], find: &Finder) -> Vec<BTreeSet<String>> {
         .map(|f| {
             let d = dirname(&f.path);
             let mut refs: BTreeSet<String> = BTreeSet::new();
-            let toks: BTreeSet<String> = PATH_REF.captures_iter(&f.bare).filter_map(|c| c.ok().map(|c| c[1].to_string())).collect();
+            let toks: BTreeSet<String> = PATH_REF.captures_iter(&f.bare).map_while(Result::ok).map(|c| c[1].to_string()).collect();
             for tok in toks {
                 refs.extend(find.path(&tok, d));
             }

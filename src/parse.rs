@@ -10,7 +10,7 @@ use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::{self, Lang, Resolver};
 use crate::rules::{routes_file, BARE_VERB_DECORATOR, BARE_VERB_DECORATOR_LANGS, NAMED_ROUTE_ARGS, NAMED_ROUTE_CALLS, ROUTE_TABLES, ROUTE_TABLE_ENTRY, VIEW_ROUTE_NAME, VIEW_VERB, PATTERN_PARTS, CLASS_PREFIX, DECORATOR_ROUTES, HANDLER_FORMS, HANDLER_KWARGS, HANDLER_WRAP, INCLUDE, METHODS_AFTER, RESOURCES, ROUTE_BARE, ROUTE_CALLS, ROUTE_RES, ROUTE_VERB_PREFIXES};
-use crate::tables::{COMMENTS, STRINGS};
+use crate::tables::{replace_all_lossy, COMMENTS, STRINGS};
 use crate::text::{first_sentence, header_doc, lead_comment, line_of, slice, squash_ws};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -493,8 +493,8 @@ pub fn parse(f: &mut File) {
         Some(g) => parse_tree(f, &src, g),
         None => {
             // a page or style sheet: no syntax tree, only the text
-            f.bare = COMMENTS.replace_all(&f.text, " ").into_owned();
-            f.code = STRINGS.replace_all(&f.bare, "\"\"").into_owned();
+            f.bare = replace_all_lossy(&COMMENTS, &f.text, " ");
+            f.code = replace_all_lossy(&STRINGS, &f.bare, "\"\"");
         }
     }
     let lines: Vec<&str> = f.text.lines().collect();

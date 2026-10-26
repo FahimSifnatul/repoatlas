@@ -138,7 +138,20 @@ fn rx(p: &str) -> Regex {
     Regex::new(p).unwrap()
 }
 fn frx(p: &str) -> fancy_regex::Regex {
-    fancy_regex::Regex::new(p).unwrap()
+    fancy_regex::RegexBuilder::new(p).backtrack_limit(5_000_000).build().unwrap()
+}
+/// replace_all that survives a pathological file: fancy_regex's own panics when the backtrack limit is hit,
+/// here the text from the failing match onward is kept as it is
+pub fn replace_all_lossy(re: &fancy_regex::Regex, text: &str, with: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in re.find_iter(text).map_while(Result::ok) {
+        out.push_str(&text[last..m.start()]);
+        out.push_str(with);
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 pub static CHDIR: LazyLock<Regex> = LazyLock::new(|| rx(r#"\b(?:chdir|Chdir|cd)\s*\(?\s*["']?(/?[\w./-]+)"#));
