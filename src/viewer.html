@@ -95,19 +95,24 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .cols{display:flex;gap:var(--cg,84px)}
 .col{width:var(--cw,262px);flex:none;display:flex;flex-direction:column;justify-content:center;gap:14px}
 .edges{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
-.edges path{fill:none;stroke-linecap:round;transition:opacity .15s}
-.edges .e{stroke-width:2;opacity:.5}
-.edges .e.conv{stroke-dasharray:5 5}
-.edges .tip{opacity:.6;stroke:none}
-.inner.traced .e:not(.on),.inner.traced .tip:not(.on){opacity:.06}
-.inner.traced .e.on{opacity:.9;stroke-width:3px}
-.inner.traced .tip.on{opacity:1}
+/* roads: grey asphalt with a white centre line, an arrow where they enter a building, cars driving the way the calls go */
+.road{transition:opacity .15s}
+.road .asp{fill:none;stroke:#c9d0dd;stroke-linecap:round;stroke-linejoin:round;transition:stroke .15s}
+.road .mid{fill:none;stroke:#fff;stroke-width:1.3;stroke-dasharray:6 7;opacity:.9}
+.road .tip{fill:#8896b0;stroke:none}
+.road.conv .asp{stroke:#b4bdcf;stroke-width:1.8px;stroke-dasharray:1.5 5}   /* a footpath: loaded by the framework, never called */
+.road.conv .mid{display:none}
+.car rect:first-child{stroke:#fff;stroke-width:1}
+.inner.traced .road:not(.on){opacity:.3}
+.inner.traced .road:not(.on) .car{display:none}
+.inner.traced .road.on .asp,.inner.focus .road.hl .asp{stroke:var(--t)}
+.inner.traced .road.on .tip,.inner.focus .road.hl .tip{fill:var(--t)}
 .inner.traced .node:not(.on){opacity:.45}
-.inner.focus .e:not(.hl),.inner.focus .tip:not(.hl){opacity:.08}
-.inner.focus .e.hl,.inner.focus .tip.hl{opacity:1}
+.inner.focus .road:not(.hl){opacity:.25}
+.inner.focus .road.hl{opacity:1}
 .inner.focus .node:not(.rel){opacity:.5}
 .inner.focus .node.rel{opacity:1}
-.edges .dot{stroke:#fff;stroke-width:2.5}
+.edges .dot rect:first-child{stroke:#fff;stroke-width:1.5}
 
 .node{--c:#4f5bd5;position:relative;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;width:100%;text-align:left;background:#fff;border:1.5px solid var(--line);
   border-left:6px solid var(--c);border-radius:10px;padding:11px 14px 11px;transition:background .12s,border-color .12s,opacity .15s}
@@ -124,8 +129,9 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .lanes .node{padding:7px 10px;border-left-width:5px}
 .lanes .nm{font-size:14px}
 .lanes .ms{font-size:11.5px}
-.lanes .edges .e{opacity:.2;stroke-width:1.4px}
-.lanes.focus .edges .e.hl{opacity:1;stroke-width:2.4px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0 0 10px;font-size:12.5px}
+.lg{display:inline-flex;align-items:center;gap:5px;color:var(--ink3)}
+.lg b{font-weight:600;color:var(--ink)}
 .lanes{display:grid;column-gap:28px}
 .lhead{font:650 12px var(--body);color:var(--ink3);text-transform:uppercase;letter-spacing:.05em;padding:0 2px 8px}
 .lcell{display:flex;flex-direction:column;justify-content:center;gap:12px;padding:14px 0;border-top:1.5px solid var(--line);min-width:0}
@@ -257,19 +263,31 @@ const N = D.nodes, R = D.repo, NS = 'http://www.w3.org/2000/svg';
 const LK = Object.fromEntries(D.layers.map(l => [l.key, l]));
 const $ = id => document.getElementById(id);
 
+// every box is a building: the layer says what kind (a bank keeps the data, a factory does the work)
 const ICON = {
-  interface:'<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
-  api:'<path d="M3 12h12M10 6l6 6-6 6M20 4v16"/>',
-  logic:'<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M18 11.5c0 4-6 3-11 5"/>',
-  data:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
-  integration:'<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/>',
+  interface:'<path d="M4 10l1.5-5h13L20 10M4 10h16M4 10a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4h4v4"/>',
+  api:'<rect x="3" y="7" width="18" height="13" rx="1.5"/><path d="M3 9l9 6 9-6M12 3v4"/>',
+  logic:'<path d="M3 20h18M5 20V9l5 3.5V9l5 3.5V4h4v16"/>',
+  data:'<path d="M3 9l9-5 9 5zM5 9v8M9.5 9v8M14.5 9v8M19 9v8M3 20h18M4 17h16"/>',
+  integration:'<path d="M12 11v10M8 21h8M9 11l3-8 3 8zM6 7a8 8 0 0 0 0 6M18 7a8 8 0 0 1 0 6"/>',
   shared:'<rect x="3" y="8" width="18" height="12" rx="2"/><path d="M9 8V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M3 13h18"/>',
-  config:'<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  config:'<path d="M13 3L5 13h6l-1 8 8-10h-6z"/>',
   tests:'<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/>',
-  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-  file:'<path d="M7 3h7l5 5v13H7zM14 3v5h5"/>',
+  folder:'<path d="M3 21h18M5 21V8h6v13M11 21V4h8v17M8 11h.01M8 15h.01M14 8h2M14 12h2M14 16h2"/>',
+  file:'<path d="M4 11l8-7 8 7M6 10v10h12V10M10 20v-5h4v5"/>',
+  station:'<rect x="5" y="3" width="14" height="14" rx="3"/><path d="M5 11h14M9 21l2-4M15 21l-2-4M9 14h.01M15 14h.01"/>',
+  datacentre:'<rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/>',
+  depot:'<path d="M3 8l9-5 9 5v12H3zM3 8l9 6 9-6"/>',
+  warehouse:'<path d="M3 20V9l9-5 9 5v11M7 20v-7h10v7M7 16h10"/>',
+  airport:'<path d="M2 16l20-4L2 8v5l12 1-12 1z"/>',
+  gate:'<path d="M4 21V9a8 8 0 0 1 16 0v12M4 21h4v-7a4 4 0 0 1 8 0v7h4"/>',
   flag:'<path d="M5 21V4M5 4h12l-3 4 3 4H5"/>'
 };
+const BNAME = {interface:'Shop', api:'Post office', logic:'Factory', data:'Bank', integration:'Telephone exchange', shared:'Workshop', config:'Power station',
+  tests:'Inspection office', folder:'City block', file:'House', station:'Train station', datacentre:'Data centre', depot:'Mail depot',
+  warehouse:'Warehouse', airport:'Airport', gate:'City gate'};
+const IOB = {db:'datacentre', db_read:'datacentre', db_write:'datacentre', queue:'depot', file_in:'warehouse', file_out:'warehouse', http_out:'airport'};
+const ioIcon = k => IOB[k] || 'gate';   // everything else comes in or goes out at the edge of town
 const LANGC = R.colors || {};   // each language file in languages/ declares its own colour
 const KIND = {class:'#4f5bd5',function:'#1fa971',route:'#f08a24',type:'#e0457b',component:'#17a2b8'};
 
@@ -371,15 +389,15 @@ let shownRun = 0;   // the program whose steps are listed below the map
 function card(id, showPath) {
   if (isRun(id)) {                        // a program: where its journey starts; opens its steps
     const j = +id.slice(4), P = D.flow.processes[j];
-    return el('button', {class:'node run', style:`--c:var(--ink)`, 'data-id':id, 'aria-current': j === shownRun ? 'true' : null, onclick:() => choose(j, -1)},
-      el('div', {class:'nm'}, svg('flag', 18), el('span', {}, P.name)),
+    return el('button', {class:'node run', style:`--c:var(--ink)`, title:BNAME.station, 'data-id':id, 'aria-current': j === shownRun ? 'true' : null, onclick:() => choose(j, -1)},
+      el('div', {class:'nm'}, svg('station', 18), el('span', {}, P.name)),
       P.command ? el('div', {class:'pth', title:P.command}, P.command) : null,
       el('p', {class:'ds'}, 'Program. Click to follow its steps.'));
   }
   if (isIo(id)) {                         // what the program takes in or gives out: not a page, so not clickable
     const k = ioKey(id);
-    return el('div', {class:'node io', style:`--c:${tint(id)}`, 'data-id':id},
-      el('div', {class:'nm'}, el('span', {}, IO[k][0])),
+    return el('div', {class:'node io', style:`--c:${tint(id)}`, title:BNAME[ioIcon(k)], 'data-id':id},
+      el('div', {class:'nm'}, svg(ioIcon(k), 18), el('span', {}, IO[k][0])),
       el('p', {class:'ds'}, SAYS[IO[k][1]]));
   }
   const n = N[id];
@@ -387,7 +405,7 @@ function card(id, showPath) {
     ? [el('span', {}, el('b', {}, fmt(n.loc)), ' lines'), n.symbols.length ? el('span', {}, el('b', {}, n.symbols.length), n.symbols.length === 1 ? ' item' : ' items') : null]
     : [el('span', {}, el('b', {}, fmt(n.files)), n.files === 1 ? ' file' : ' files'), el('span', {}, el('b', {}, fmt(n.loc)), ' lines')];
   const where = showPath && n.path && n.path !== n.name ? n.path : null;
-  return el('button', {class:'node', style:`--c:${colorOf(n)}`, 'data-id':id, onclick:() => go(id)},
+  return el('button', {class:'node', style:`--c:${colorOf(n)}`, title:BNAME[iconOf(n)], 'data-id':id, onclick:() => go(id)},
     el('div', {class:'nm'}, svg(iconOf(n), 18), el('span', {}, n.name)),
     where ? el('div', {class:'pth', title:where}, where) : null,
     el('p', {class:'ds'}, n.desc),
@@ -404,38 +422,66 @@ function graph({cols, edges, showPath}) {
   const n = cols.length, avail = Math.min(innerWidth - 48, 1072), cg = n > 3 ? 56 : 84;
   inner.style.setProperty('--cg', cg + 'px');
   inner.style.setProperty('--cw', Math.max(210, Math.min(262, Math.floor((avail - (n - 1) * cg) / n))) + 'px');
-  wire(inner, sv, cards, edges);
+  wire(inner, sv, cards, edges, cg);
   return el('div', {class:'graph'}, inner);
 }
-// the connecting lines: drawn over the laid-out cards, redrawn when the size changes, and lit by hovering a card
-function wire(inner, sv, cards, edges) {
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;   // SMIL ignores the CSS rule, so no cars are made at all
+const CARS = 60, SPEED = 55;   // only the busiest roads carry traffic; pixels per second
+let roadId = 0;
+const svgEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); return e; };
+function carShape(fill) {   // drawn at the origin, nose pointing along +x
+  const g = svgEl('g');
+  g.innerHTML = `<rect x="-6" y="-3.2" width="12" height="6.4" rx="2.4" style="fill:${fill}"/><rect x="0.5" y="-2.1" width="3.6" height="4.2" rx="1" fill="#fff" opacity=".85"/>`;
+  return g;
+}
+function street(pts) {   // straight blocks joined by rounded corners
+  pts = pts.filter((p, i) => !i || p[0] !== pts[i - 1][0] || p[1] !== pts[i - 1][1]);
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1], [cx, cy] = pts[i], [nx, ny] = pts[i + 1];
+    const r = Math.min(8, Math.hypot(px - cx, py - cy) / 2, Math.hypot(nx - cx, ny - cy) / 2);
+    d += ` L${cx + Math.sign(px - cx) * r},${cy + Math.sign(py - cy) * r} Q${cx},${cy} ${cx + Math.sign(nx - cx) * r},${cy + Math.sign(ny - cy) * r}`;
+  }
+  return d + ` L${pts[pts.length - 1][0]},${pts[pts.length - 1][1]}`;
+}
+// the roads: drawn over the laid-out buildings, redrawn when the size changes, and lit by hovering a building.
+// A road leaves the right side of the caller, runs along the avenue before the callee, and enters its left side.
+function wire(inner, sv, cards, edges, gap) {
   const drawn = [];
-  let lit = null;   // the journey picked on the left: its lines stay strong, the rest fade
+  let lit = null;   // the journey picked on the left: its roads stay strong, the rest fade
+  const small = inner.classList.contains('lanes');
+  const busy = new Set(edges.map((e, i) => [i, e[3] ? 0 : e[2] || 1]).filter(x => x[1]).sort((a, b) => b[1] - a[1]).slice(0, CARS).map(x => x[0]));
   const draw = () => {
     sv.replaceChildren(); drawn.length = 0;
     sv.setAttribute('width', inner.scrollWidth); sv.setAttribute('height', inner.scrollHeight);
-    for (const [a, b, wt, cv] of edges) {   // cv: the framework loads b by convention, no code imports it
+    edges.forEach(([a, b, wt, cv], i) => {   // cv: the framework loads b by convention, no code imports it: a footpath
       const ea = cards[a], eb = cards[b];
-      if (!ea || !eb || ea.hidden || eb.hidden) continue;
+      if (!ea || !eb || ea.hidden || eb.hidden) return;
       const on = lit && lit.edge(a, b) ? ' on' : '';
       const x1 = ea.offsetLeft + ea.offsetWidth, y1 = ea.offsetTop + ea.offsetHeight / 2;
-      const y2 = eb.offsetTop + eb.offsetHeight / 2, back = eb.offsetLeft < x1 + 4;   // back: the line returns to a part in the same or an earlier column
-      const x2 = back ? eb.offsetLeft + eb.offsetWidth + 7 : eb.offsetLeft - 7, dx = back ? 44 : Math.max(36, (x2 - x1) / 2);
-      const col = tint(a);
-      const p = document.createElementNS(NS, 'path');
-      p.setAttribute('class', (cv ? 'e conv' : 'e') + on); p.style.stroke = col;
-      p.setAttribute('stroke-width', (1.6 + Math.min(2.4, Math.log2((wt || 1) + 1) * 0.55)).toFixed(2));
-      p.setAttribute('d', back ? `M${x1},${y1} C${x1 + dx},${y1} ${x2 + dx},${y2} ${x2},${y2}` : `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
-      const t = document.createElementNS(NS, 'path');
-      t.setAttribute('class', 'tip' + on); t.style.fill = col;
-      t.setAttribute('d', back ? `M${x2 - 5},${y2} l9,-5.5 l0,11 z` : `M${x2 + 5},${y2} l-9,-5.5 l0,11 z`);
-      sv.append(p, t); drawn.push({a, b, p, t});
-    }
+      const y2 = eb.offsetTop + eb.offsetHeight / 2, back = eb.offsetLeft < x1 + 4;   // back: the road returns to a part in the same or an earlier column
+      const x2 = back ? eb.offsetLeft + eb.offsetWidth + 7 : eb.offsetLeft - 7;
+      const xv = back ? x1 + gap / 2 : eb.offsetLeft - gap * 0.6;
+      const col = tint(a), d = street([[x1, y1], [xv, y1], [xv, y2], [x2, y2]]), id = 'rd' + (++roadId);
+      const g = svgEl('g', {class:'road' + (cv ? ' conv' : '') + on});
+      g.style.setProperty('--t', col);
+      const p = svgEl('path', {class:'asp', d, id});
+      if (!cv) p.style.strokeWidth = ((small ? 5 : 7) + Math.min(3, Math.log2((wt || 1) + 1) * 0.8)).toFixed(1);
+      g.append(p, svgEl('path', {class:'mid', d}),
+        svgEl('path', {class:'tip', d: back ? `M${x2 - 5},${y2} l9,-5.5 l0,11 z` : `M${x2 + 5},${y2} l-9,-5.5 l0,11 z`}));
+      if (!cv && !still && busy.has(i)) {   // one car per busy road, spread along it so they do not start in a convoy
+        const dur = Math.max(2, (Math.abs(xv - x1) + Math.abs(y2 - y1) + Math.abs(x2 - xv)) / SPEED), car = carShape(col), mv = svgEl('animateMotion', {dur: dur + 's', repeatCount:'indefinite', rotate:'auto', begin: `-${(i * 1.7 % dur).toFixed(2)}s`});
+        car.setAttribute('class', 'car');
+        mv.append(svgEl('mpath', {href:'#' + id}));
+        car.append(mv); g.append(car);
+      }
+      sv.append(g); drawn.push({a, b, g, p});
+    });
   };
   const focus = (id, on) => {
     inner.classList.toggle('focus', on);
     const rel = new Set([id]);
-    drawn.forEach(d => { const hit = on && (d.a === id || d.b === id); d.p.classList.toggle('hl', hit); d.t.classList.toggle('hl', hit); if (hit) { rel.add(d.a); rel.add(d.b); } });
+    drawn.forEach(d => { const hit = on && (d.a === id || d.b === id); d.g.classList.toggle('hl', hit); if (hit) { rel.add(d.a); rel.add(d.b); } });
     Object.entries(cards).forEach(([k, c]) => c.classList.toggle('rel', on && rel.has(k)));
   };
   Object.entries(cards).forEach(([id, c]) => {
@@ -510,7 +556,7 @@ function children(n) {
   const out = [sec(n.kind === 'layer' ? 'Parts in this layer' : 'What is inside', 'Click any box to open it.')];
   const showPath = n.kind === 'layer';
   if (kids.length <= 30 && conn.length >= 2) {
-    out.push(el('p', {class:'ftag'}, 'Lines run from a part to the parts it uses. Hover a box to follow its connections.'));
+    out.push(el('p', {class:'ftag'}, 'Roads run from a part to the parts it uses, and cars drive that way. Hover a building to follow its roads.'));
     out.push(graph({...layout(conn, n.edges), showPath}));
     if (alone.length) out.push(el('h3', {class:'sub'}, 'Standing on their own', el('span', {}, 'Nothing else here uses them, and they use nothing here.')), grid(alone, showPath));
   } else out.push(grid(kids, showPath));
@@ -683,9 +729,15 @@ function lanes(onStop, railed) {
       ids.map(id => cards[id]), cap && cap.btn));
   }));
   settle();
-  w = wire(inner, sv, cards, edges);
+  w = wire(inner, sv, cards, edges, 28);
   let token = 0;   // a new journey, or a redraw, ends an animation in progress
+  const kinds = [['station', 'a program starts', 'var(--ink)'], ...layers.map(l => [l, LK[l].name, LK[l].color])], byIcon = {};
+  for (const k of ioKeys) { const ic = ioIcon(k); (byIcon[ic] = byIcon[ic] || []).push(IO[k][0]); }
+  Object.entries(byIcon).forEach(([ic, ls]) => kinds.push([ic, [...new Set(ls)].join(', '), 'var(--ink2)']));
+  const legend = el('div', {class:'legend'}, kinds.map(([ic, what, c]) =>
+    el('span', {class:'lg', style:`color:${c}`}, svg(ic, 16), el('b', {}, BNAME[ic]), what)));
   return {
+    legend,
     el: el('div', {class:'graph wide'}, inner),
     light(tr) {
       token++;
@@ -702,16 +754,17 @@ function lanes(onStop, railed) {
       const my = ++token;
       const paths = seq.map(([a, b]) => w.drawn.find(d => d.a === a && d.b === b)).filter(Boolean).map(d => d.p);
       if (!paths.length) return done();
-      const dot = document.createElementNS(NS, 'circle');
-      dot.setAttribute('class', 'dot'); dot.setAttribute('r', 7); dot.style.fill = 'var(--ink)';
+      const dot = carShape('var(--ink)');   // a car drives each road of the journey in turn
+      dot.setAttribute('class', 'dot');
       sv.append(dot);
       let i = 0, t0 = null;
       const tick = ts => {
         const p = paths[i];
         if (my !== token || !p.isConnected) { dot.remove(); return done(); }
         if (t0 === null) t0 = ts;
-        const f = Math.min(1, (ts - t0) / 650), pt = p.getPointAtLength(f * p.getTotalLength());
-        dot.setAttribute('cx', pt.x); dot.setAttribute('cy', pt.y);
+        const len = p.getTotalLength(), f = Math.min(1, (ts - t0) / 650), at = f * len;
+        const pt = p.getPointAtLength(at), a0 = p.getPointAtLength(Math.max(0, at - 2)), a1 = p.getPointAtLength(Math.min(len, at + 2));
+        dot.setAttribute('transform', `translate(${pt.x},${pt.y}) rotate(${Math.atan2(a1.y - a0.y, a1.x - a0.x) * 180 / Math.PI}) scale(1.5)`);
         if (f < 1) return requestAnimationFrame(tick);
         t0 = null;
         if (++i < paths.length) requestAnimationFrame(tick); else { dot.remove(); done(); }
@@ -805,7 +858,7 @@ function flowView(j0, k0) {
     el('p', {class:'lead'}, solo ? 'Follow the program from where it starts to where it ends.'
       : 'Pick a program or a web request. The boxes it passes through light up on the map, numbered in the order it reaches them.')));
   const pane = el('div', {class:'pane'}, solo ? null : pick,
-    map ? [sec('The map', 'The whole codebase in one picture. Columns run from what comes in, through where the program starts and each layer, to what goes out. Solid lines run from a part to the parts it calls; dashed lines are parts the framework loads or that are imported but not called. Hover a box to follow its lines, click it to open it, or click a number to see its first step.'), map.el] : null,
+    map ? [sec('The map', 'The whole codebase as a small city. Each box is a building and its kind says what it does. Roads run from a part to the parts it calls, and cars drive the way the calls go; dotted paths lead to parts the framework loads or that are imported but not called. Hover a building to follow its roads, click it to open it, or click a number to see its first step.'), map.legend, map.el] : null,
     detail);
   show(sj, sk);
   if (D.flow.unreached.length) pane.append(sec('Not on any journey', 'Nothing above starts or loads these. They run some other way (a separate command, the framework itself) or are not used.'), grid(D.flow.unreached, true));
