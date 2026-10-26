@@ -2439,6 +2439,8 @@ fn spring_bare_mapping_answers_at_the_class_prefix() {
 fn routes_written_without_parentheses() {
     let d = analyze(&[("app.rb", "require 'sinatra'\n\nget '/hello' do\n  greet\nend\n\ndef greet\n  'hi'\nend\n")]);
     assert_eq!(route_paths(&procs(&d)[0]), ["GET /hello"]);
+    // `greet` alone is a call, so the route runs it
+    assert_eq!(route_first(&d, "/hello").as_deref(), Some("greet()"));
 }
 
 #[test]
@@ -2466,7 +2468,7 @@ fn active_record_models_read_and_write() {
         ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
         ("app.rb", "require 'sinatra'\n\nget '/users' do\n  list\nend\n\ndef list\n  User.where(active: true).first\n  User.create(name: 'x')\nend\n"),
     ]);
-    assert_eq!(db_steps(&d, ""), ["reads User", "writes User"]);
+    assert_eq!(db_steps(&d, "/users"), ["reads User", "writes User"]);
 }
 
 #[test]
@@ -2488,4 +2490,30 @@ fn module_typescript_and_newer_entry_forms() {
     assert!(d["nodes"].get("lib/util.mts").is_some());
     assert!(d["nodes"]["src/Main.scala"]["entry"].as_bool().unwrap());
     assert!(!procs(&d).is_empty());
+}
+
+#[test]
+fn a_file_that_is_only_reached_adds_just_what_is_called() {
+    // util.py is called into, not started: its other function and what that calls are not on the map
+    let d = analyze(&[
+        ("main.py", "from util import a\n\nif __name__ == '__main__':\n    a()\n"),
+        ("util.py", "from other import c\n\ndef a():\n    return 1\n\ndef b():\n    return c()\n"),
+        ("other.py", "def c():\n    return 2\n"),
+    ]);
+    // other.py is imported, so it may sit on the map as a dotted path; no road of calls runs from util.py to it
+    let calls = d["flow"]["map"]["edges"].as_array().unwrap().iter()
+        .filter(|e| e[0].as_str().unwrap().contains("util") && e[1].as_str().unwrap().contains("other") && e.get(3).is_none()).count();
+    assert_eq!(calls, 0, "{:?}", d["flow"]["map"]["edges"]);
+}
+
+#[test]
+fn endpoints_after_the_listed_ones_stay_on_the_map() {
+    let mut app = String::from("from flask import Flask\nimport svc\napp = Flask(__name__)\n\n");
+    for i in 0..45 {
+        app += &format!("@app.get('/r{i}')\ndef r{i}():\n    return {}\n\n", if i == 44 { "svc.work()" } else { "1" });
+    }
+    app += "if __name__ == '__main__':\n    app.run()\n";
+    let d = analyze(&[("app.py", &app), ("svc.py", "def work():\n    return 1\n")]);
+    assert_eq!(procs(&d)[0]["routes"].as_array().unwrap().len(), 40);
+    assert!(strs(&d["flow"]["map"]["parts"]).iter().any(|p| p.contains("svc")), "{:?}", d["flow"]["map"]["parts"]);
 }

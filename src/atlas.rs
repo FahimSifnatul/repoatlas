@@ -908,7 +908,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                     // the map covers every endpoint, though the list below it stops at MAX_ROUTES
                     route_starts.extend(pre.iter().chain(hs.iter()).copied());
                     if routes.len() >= MAX_ROUTES {
-                        break;
+                        continue;
                     }
                     let mut w = Walk::new(&ctx, MAX_ROUTE_STEPS);
                     for g in pre {

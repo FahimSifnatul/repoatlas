@@ -155,8 +155,9 @@ pub fn reach(ctx: &Ctx, starts: &[Gid]) -> Reach {
         for &ci in own {
             next.extend(ctx.targets[g.0][ci].iter().copied());
         }
-        // a start that calls nothing itself (a library, a page): what it defines and the scripts it loads
-        if own.iter().all(|&ci| ctx.targets[g.0][ci].is_empty()) && f.defs[g.1].kind == Kind::Module {
+        // a start that calls nothing itself (a library, a page): what it defines and the scripts it loads (a file merely reached
+        // runs only what is called in it)
+        if own.iter().all(|&ci| ctx.targets[g.0][ci].is_empty()) && f.defs[g.1].kind == Kind::Module && starts.contains(&g) {
             next.extend(ctx.defines(g.0));
             if f.lang.grammar.is_none() {
                 next.extend(f.uses.iter().filter_map(|u| ctx.ix.get(u).filter(|&&i| ctx.files[i].lang.grammar.is_some()).map(|&i| (i, 0))));

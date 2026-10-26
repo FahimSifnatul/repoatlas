@@ -845,7 +845,7 @@ function flowView(j0, k0) {
       P.routes.length ? [el('h3', {}, 'Web requests'), ...routesOf(P, j)] : null)));
   rail.querySelectorAll('.prog').forEach((b, j) => { b.dataset.j = j; });
   const railPick = rail.querySelector('.rail-pick');
-  const pick =el('select', {class:'pick', 'aria-label':'Pick a journey', onchange:e => { const [j, k] = e.target.value.split('/').map(Number); choose(j, k); }},
+  const pick = el('select', {class:'pick', 'aria-label':'Pick a journey', onchange:e => { const [j, k] = e.target.value.split('/').map(Number); choose(j, k); }},
     all.flatMap((P, j) => [el('option', {value:`${j}/-1`}, P.name), ...P.routes.map((r, k) => el('option', {value:`${j}/${k}`}, `${r.verb} ${r.path}`))]));
 
   const show = (j, k) => {
