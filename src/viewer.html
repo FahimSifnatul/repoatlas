@@ -121,9 +121,6 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .node.run[aria-current=true]{background:color-mix(in srgb,var(--ink) 8%,#fff);border-color:var(--ink)}
 .node[hidden]{display:none}
 .node.ping{box-shadow:0 0 0 4px color-mix(in srgb,var(--c) 40%,transparent);opacity:1!important}
-.stop{position:absolute;bottom:7px;right:8px;min-width:22px;height:22px;padding:0 5px;border-radius:99px;background:var(--ink);color:#fff;
-  font:700 12px/22px var(--mono);text-align:center}
-.node:has(.stop) .ms{padding-right:30px}
 .more{border:1.5px dashed var(--line);background:none;border-radius:10px;padding:5px;font-size:13px;color:var(--ink2)}
 .more:hover{border-color:var(--ink3);color:var(--ink)}
 .lanes .node{padding:7px 10px;border-left-width:5px}
@@ -132,10 +129,6 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0 0 10px;font-size:12.5px}
 .lg{display:inline-flex;align-items:center;gap:5px;color:var(--ink3)}
 .lg b{font-weight:600;color:var(--ink)}
-.lanes{display:grid;column-gap:28px}
-.lhead{font:650 12px var(--body);color:var(--ink3);text-transform:uppercase;letter-spacing:.05em;padding:0 2px 8px}
-.lcell{display:flex;flex-direction:column;justify-content:center;gap:12px;padding:14px 0;border-top:1.5px solid var(--line);min-width:0}
-.lname{font:600 13px var(--body);color:var(--ink3)}
 .lanes .ds{display:none}
 .node.io{cursor:default;border-style:dashed;border-left-style:solid;background:color-mix(in srgb,var(--c) 6%,#fff)}
 .nm{display:flex;align-items:center;gap:8px;font:650 16px/1.25 var(--display);color:var(--ink)}
@@ -217,6 +210,8 @@ button.tg[aria-expanded=true]{transform:rotate(90deg)}
 .grp summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .grp summary i{margin-left:auto;font:600 11.5px var(--body);font-style:normal;color:var(--ink3)}
 .pick{display:none;margin-bottom:12px;width:100%;font:inherit;padding:8px 10px;border:1.5px solid var(--line);border-radius:10px;background:#fff}
+.rail-pick{display:block;margin:0 0 4px;width:100%;font:inherit;font-size:14px;padding:6px 10px;border:1.5px solid var(--line);border-radius:8px;background:#fff}
+.prog[hidden]{display:none}
 .play{margin-left:auto;border:1.5px solid var(--ink);background:var(--ink);color:#fff;border-radius:99px;padding:3px 14px;font:600 13.5px var(--body)}
 .play:hover{background:#1f3158}
 .play:disabled{opacity:.5;cursor:default}
@@ -450,23 +445,56 @@ function wire(inner, sv, cards, edges, gap) {
   const drawn = [];
   let lit = null;   // the journey picked on the left: its roads stay strong, the rest fade
   const small = inner.classList.contains('lanes');
-  const busy = new Set(edges.map((e, i) => [i, e[3] ? 0 : e[2] || 1]).filter(x => x[1]).sort((a, b) => b[1] - a[1]).slice(0, CARS).map(x => x[0]));
+  const busyOf = () => new Set(edges.map((e, i) => [i, e[3] ? 0 : e[2] || 1]).filter(x => x[1]).sort((a, b) => b[1] - a[1]).slice(0, CARS).map(x => x[0]));
+  // Roads that leave one building share a single street out of it and branch off in the avenue, so a part that calls many others
+  // is one trunk, not a bundle. Different buildings get different verticals in an avenue, ordered so they cross as little as
+  // possible, and every road enters its target at its own height.
+  const place = (vis, gap) => {
+    const by = (items, key, other, set) => {
+      const g = new Map();
+      items.forEach(e => { const k = key(e); if (!g.has(k)) g.set(k, []); g.get(k).push(e); });
+      g.forEach(es => es.sort(other).forEach((e, k) => set(e, es.length, k)));
+    };
+    const at = (c, n, k) => c.offsetTop + 8 + Math.max(0, c.offsetHeight - 16) * (k + 1) / (n + 1);
+    vis.forEach(e => { e.y1 = e.cy1; });
+    by(vis, e => e.b + (e.back ? '<' : '>'), (p, q) => p.cy1 - q.cy1, (e, n, k) => { e.y2 = at(e.eb, n, k); });
+    const trunks = new Map();
+    vis.forEach(e => {
+      const key = Math.round(e.back ? e.x1 + gap : e.eb.offsetLeft), id = key + '|' + e.a;
+      if (!trunks.has(id)) trunks.set(id, {key, es: []});
+      trunks.get(id).es.push(e);
+    });
+    const claims = [...trunks.values()].map(c => ({...c, s: c.es[0].y1, t: c.es.reduce((n, e) => n + e.y2, 0) / c.es.length}));
+    by(claims, c => c.key, (p, q) => {   // upward trunks first; downward ones, the lower start sits further left
+      const dp = p.t >= p.s, dq = q.t >= q.s;
+      return dp !== dq ? dp - dq : dp ? q.s - p.s : p.s - q.s;
+    }, (c, n, k) => {
+      const step = n > 1 ? Math.max(2, Math.min(9, (gap - 16) / (n - 1))) : 0;
+      const back = c.es[0].back;
+      c.es.forEach(e => { e.xv = (back ? e.x1 + gap / 2 : e.eb.offsetLeft - gap / 2) - step * (n - 1) / 2 + step * k; });
+    });
+  };
   const draw = () => {
     sv.replaceChildren(); drawn.length = 0;
     sv.setAttribute('width', inner.scrollWidth); sv.setAttribute('height', inner.scrollHeight);
+    const busy = busyOf(), vis = [];
     edges.forEach(([a, b, wt, cv], i) => {   // cv: the framework loads b by convention, no code imports it: a footpath
       const ea = cards[a], eb = cards[b];
       if (!ea || !eb || ea.hidden || eb.hidden) return;
+      const x1 = ea.offsetLeft + ea.offsetWidth;
+      vis.push({a, b, wt, cv, i, ea, eb, x1, back: eb.offsetLeft < x1 + 4,   // back: the road returns to a part in the same or an earlier column
+        cy1: ea.offsetTop + ea.offsetHeight / 2, cy2: eb.offsetTop + eb.offsetHeight / 2});
+    });
+    place(vis, typeof gap === 'function' ? gap() : gap);
+    vis.forEach(({a, b, wt, cv, i, eb, x1, y1, y2, xv, back}) => {
       const on = lit && lit.edge(a, b) ? ' on' : '';
-      const x1 = ea.offsetLeft + ea.offsetWidth, y1 = ea.offsetTop + ea.offsetHeight / 2;
-      const y2 = eb.offsetTop + eb.offsetHeight / 2, back = eb.offsetLeft < x1 + 4;   // back: the road returns to a part in the same or an earlier column
       const x2 = back ? eb.offsetLeft + eb.offsetWidth + 7 : eb.offsetLeft - 7;
-      const xv = back ? x1 + gap / 2 : eb.offsetLeft - gap * 0.6;
-      const col = tint(a), d = street([[x1, y1], [xv, y1], [xv, y2], [x2, y2]]), id = 'rd' + (++roadId);
+      const pts = [[x1, y1], [xv, y1], [xv, y2], [x2, y2]];
+      const col = tint(a), d = street(pts), id = 'rd' + (++roadId);
       const g = svgEl('g', {class:'road' + (cv ? ' conv' : '') + on});
       g.style.setProperty('--t', col);
       const p = svgEl('path', {class:'asp', d, id});
-      if (!cv) p.style.strokeWidth = ((small ? 5 : 7) + Math.min(3, Math.log2((wt || 1) + 1) * 0.8)).toFixed(1);
+      if (!cv) p.style.strokeWidth = ((small ? 3.5 : 7) + Math.min(small ? 1.5 : 3, Math.log2((wt || 1) + 1) * (small ? 0.5 : 0.8))).toFixed(1);
       g.append(p, svgEl('path', {class:'mid', d}),
         svgEl('path', {class:'tip', d: back ? `M${x2 - 5},${y2} l9,-5.5 l0,11 z` : `M${x2 + 5},${y2} l-9,-5.5 l0,11 z`}));
       if (!cv && !still && busy.has(i)) {   // one car per busy road, spread along it so they do not start in a convoy
@@ -601,7 +629,7 @@ function ioPills(keys) {
 // steps in the order the code runs them; a step's own steps follow it, one level deeper (d)
 const TAGS = {loads:'loaded, not called', dispatch:'depends on the object it is called on', ref:'handed over, runs later', middleware:'runs before the handler'};
 function outline(steps, open, prefix, hover) {   // hover(part, on): lets the map light the box a step belongs to
-  const ol = el('ol', {class:'steps'}), rows = [], first = {};
+  const ol = el('ol', {class:'steps'}), rows = [];
   const raw = steps.map(s => TAGS[s.k] || (s.guess ? 'guessed from the name' : null)), up = [];
   const tags = raw.map((t, i) => {                 // a tag covers the steps indented under it, so say it once
     const d = steps[i].d, p = d > 0 ? up[d - 1] : undefined;
@@ -630,7 +658,6 @@ function outline(steps, open, prefix, hover) {   // hover(part, on): lets the ma
     r.tg = inner ? el('button', {class:'tg', 'aria-label':'Show or hide the steps inside', onclick:() => { fold(r, !r.closed); show(); }}, '▸') : el('span', {class:'tg'});
     fold(r, inner && s.d >= open);
     const tag = tags[i], part = partOf(s.f);
-    if (part && first[part] === undefined) first[part] = i;
     if (hover && part) { r.addEventListener('mouseenter', () => hover(part, true)); r.addEventListener('mouseleave', () => hover(part, false)); }
     const line = s.k === 'more' ? [r.tg, el('span', {class:'sm'}, `+${num(s.more)} more steps not shown`)]
       : [r.tg, el('button', {class:'sn', title:s.f, onclick:() => go(s.f)}, s.n), el('span', {class:'sw'}, `${s.f.split('/').pop()}:${s.line}`),
@@ -644,7 +671,6 @@ function outline(steps, open, prefix, hover) {   // hover(part, on): lets the ma
     rows.push(r); ol.append(r);
   });
   show();
-  ol.jumpPart = p => { if (first[p] !== undefined) jump(first[p]); };
   return ol;
 }
 // the boxes a journey passes through, in the order it first reaches them, and the lines it takes between them
@@ -670,67 +696,59 @@ function trace(steps, extra, io, j) {
 // one map of the whole codebase. A row per program (parts only it runs), then a row for parts several programs share;
 // columns are fixed: what comes in, where the program starts, one per layer, what goes out. Dashed lines are parts that
 // are loaded or imported but not called. One journey at a time can be lit: its boxes are numbered, the rest fade.
-const CAP = 6;   // a crowded cell shows this many boxes and folds the rest behind "+N more"
-function lanes(onStop, railed) {
-  const M = D.flow.map, P = D.flow.processes, has = mapParts, owner = {};
-  M.lanes.forEach((us, j) => us.forEach(u => { if (has.has(u)) owner[u] = u in owner ? -1 : j; }));
-  has.forEach(u => { if (!(u in owner)) owner[u] = -1; });
-  const rows = P.map((_, j) => j);
-  if ([...has].some(u => owner[u] === -1)) rows.push(-1);
+// The boxes of one journey in columns, as a tree: a box sits one column after the first box that calls it, and only that call is
+// drawn as a road, so every road runs between neighbouring columns and none passes behind a box. A box that only feeds others
+// (what comes in) sits beside the first box it feeds. The steps below the map still list every call.
+function arrange(nodes, edges, order) {
+  const out = {}, depth = {}, via = {};
+  nodes.forEach(n => { out[n] = []; });
+  const lines = edges.filter(e => e[0] !== e[1] && out[e[0]] && out[e[1]]);
+  lines.forEach(e => out[e[0]].push(e));
+  const hasIn = new Set(lines.map(e => e[1])), feeder = n => isIo(n) && !hasIn.has(n) && out[n].length > 0;
+  const seq = id => { const i = order.indexOf(id); return i >= 0 ? i : isRun(id) ? -1 : isIo(id) ? 1e6 : 1e5; };   // the order the journey first reaches them
+  const first = [...nodes].sort((a, b) => seq(a) - seq(b));
+  nodes.forEach(n => out[n].sort((x, y) => seq(x[1]) - seq(y[1])));
+  const walk = q => { for (let i = 0; i < q.length; i++) for (const e of out[q[i]]) if (depth[e[1]] === undefined) { depth[e[1]] = depth[q[i]] + 1; via[e[1]] = e; q.push(e[1]); } };
+  const roots = first.filter(n => !feeder(n) && !lines.some(e => e[1] === n && !feeder(e[0])));
+  roots.forEach(n => { depth[n] = 0; });
+  walk(roots);
+  first.forEach(n => { if (depth[n] === undefined && !feeder(n)) { depth[n] = 0; walk([n]); } });   // a ring of calls nothing else enters
+  const roads = Object.values(via);
+  first.filter(feeder).forEach(n => { const e = out[n][0]; depth[n] = depth[e[1]] - 1; roads.push(e); });
+  const low = Math.min(0, ...nodes.map(n => depth[n]));
+  const cols = Array.from({length: Math.max(0, ...nodes.map(n => depth[n])) - low + 1}, () => []), pos = {};
+  first.forEach(n => cols[depth[n] - low].push(n));
+  cols[0].forEach((n, i) => { pos[n] = i; });
+  for (let d = 1; d < cols.length; d++) {          // one pass down: sit level with the box that calls them
+    const bc = n => via[n] ? pos[via[n][0]] : -1;
+    cols[d].sort((a, b) => bc(a) - bc(b));
+    cols[d].forEach((n, i) => { pos[n] = i; });
+  }
+  return {cols, edges: roads};
+}
+function lanes(railed) {
+  const M = D.flow.map, P = D.flow.processes, has = mapParts, cards = {}, links = [];
   const layers = D.layers.map(l => l.key).filter(k => [...has].some(u => N[u].layer === k));
-  const lc = u => layers.includes(N[u].layer) ? N[u].layer : layers[0];
   const ioKeys = Object.keys(M.io || {}).filter(k => IO[k] && M.io[k].some(u => has.has(u)));
-  const cols = [...(ioKeys.some(k => IO[k][1] === 'in') ? ['in'] : []), 'start', ...layers, ...(ioKeys.some(k => IO[k][1] !== 'in') ? ['out'] : [])];
-  const cards = {}, cell = {}, links = [];
-  // top to bottom in the order the calls reach them
-  const rank = {};
-  layout([...has], M.edges.filter(e => has.has(e[0]) && has.has(e[1]))).cols.flat().forEach((u, i) => { rank[u] = i; });
-  const put = (r, c, id) => { (cell[r + '|' + c] = cell[r + '|' + c] || []).push(id); cards[id] = card(id, false); };
-  const startedBy = new Set(M.runs.flatMap(r => r[0]));   // the files that start a program sit beside it
-  has.forEach(u => put(owner[u], startedBy.has(u) ? 'start' : lc(u), u));
-  P.forEach((_, j) => put(j, 'start', 'run:' + j));
+  [...has, ...P.map((_, j) => 'run:' + j)].forEach(id => { cards[id] = card(id, false); });
   M.runs.forEach(([from, to], j) => {
     from.filter(u => has.has(u)).forEach(u => links.push([u, 'run:' + j, 1]));
     to.filter(u => has.has(u)).forEach(u => links.push(['run:' + j, u, 1]));
   });
-  for (const k of ioKeys) for (const r of rows) {
-    const us = M.io[k].filter(u => has.has(u) && owner[u] === r);
-    if (!us.length) continue;
-    const id = `io:${k}@${r}`, inn = IO[k][1] === 'in';
-    put(r, inn ? 'in' : 'out', id);
-    us.forEach(u => links.push(inn ? [id, u, 1] : [u, id, 1]));
+  for (const k of ioKeys) {
+    const id = `io:${k}@all`, inn = IO[k][1] === 'in';
+    cards[id] = card(id, false);
+    M.io[k].filter(u => has.has(u)).forEach(u => links.push(inn ? [id, u, 1] : [u, id, 1]));
   }
-  const edges = [...M.edges.filter(e => has.has(e[0]) && has.has(e[1])), ...links];
-  const inner = el('div', {class:'inner lanes'}), sv = document.createElementNS(NS, 'svg');
+  const every = [...M.edges.filter(e => has.has(e[0]) && has.has(e[1])), ...links];
+  const edges = [];   // the roads of the journey on show; filled by light
+  const inner = el('div', {class:'inner lanes'}), sv = document.createElementNS(NS, 'svg'), colsEl = el('div', {class:'cols'});
   sv.setAttribute('class', 'edges');
+  inner.append(sv, colsEl);
   const avail = Math.min(innerWidth - 48, 1600) - (railed && innerWidth > 900 ? 264 : 0);   // the map may use the whole window, less the list of journeys
-  inner.style.setProperty('--cw', Math.max(130, Math.min(230, Math.floor((avail - (cols.length - 1) * 28) / cols.length))) + 'px');
-  inner.style.gridTemplateColumns = `repeat(${cols.length}, var(--cw))`;
-  inner.append(sv);
-  const head = c => c === 'in' ? 'Comes in' : c === 'start' ? 'Starts' : c === 'out' ? 'Goes out' : LK[c].name;
-  cols.forEach((c, i) => inner.append(el('div', {class:'lhead', style:`grid-row:1;grid-column:${i + 1}`}, head(c))));
-  const caps = [];
-  let w = null;
-  const settle = () => caps.forEach(c => {         // the boxes on the lit journey are never folded away
-    let hid = 0;
-    c.ids.forEach((id, i) => {
-      const h = !(c.open || i < CAP || isRun(id) || cards[id].classList.contains('on'));
-      cards[id].hidden = h; if (h) hid++;
-    });
-    c.btn.hidden = !hid && !c.open;
-    c.btn.textContent = c.open ? 'Show fewer' : `+${hid} more`;
-  });
-  rows.forEach((r, ri) => cols.forEach((c, ci) => {
-    const ids = (cell[r + '|' + c] || []).sort((a, b) => (rank[a] ?? -1) - (rank[b] ?? -1));
-    const cap = ids.length > CAP + 2 ? {ids, open:false, btn:el('button', {class:'more', onclick:() => { cap.open = !cap.open; settle(); w.draw(); }})} : null;
-    if (cap) caps.push(cap);
-    inner.append(el('div', {class:'lcell', style:`grid-row:${ri + 2};grid-column:${ci + 1}`},
-      r === -1 && c === 'start' && P.length > 1 ? el('div', {class:'lname'}, 'Used by more than one program') : null,
-      ids.map(id => cards[id]), cap && cap.btn));
-  }));
-  settle();
-  w = wire(inner, sv, cards, edges, 28);
+  let w = null, gap = 56;   // gap: the avenue between columns, wide enough for the roads in the busiest one
   let token = 0;   // a new journey, or a redraw, ends an animation in progress
+  w = wire(inner, sv, cards, edges, () => gap);
   const kinds = [['station', 'a program starts', 'var(--ink)'], ...layers.map(l => [l, LK[l].name, LK[l].color])], byIcon = {};
   for (const k of ioKeys) { const ic = ioIcon(k); (byIcon[ic] = byIcon[ic] || []).push(IO[k][0]); }
   Object.entries(byIcon).forEach(([ic, ls]) => kinds.push([ic, [...new Set(ls)].join(', '), 'var(--ink2)']));
@@ -739,15 +757,21 @@ function lanes(onStop, railed) {
   return {
     legend,
     el: el('div', {class:'graph wide'}, inner),
-    light(tr) {
+    light(tr) {                                    // show only the boxes and roads the journey uses, in columns
       token++;
-      inner.querySelectorAll('.stop').forEach(s => s.remove());
-      if (!tr) w.clear();
-      else {
-        w.light(tr);
-        tr.order.forEach((p, i) => cards[p] && cards[p].append(el('span', {class:'stop', title:'Show its first step', onclick:e => { e.stopPropagation(); onStop(p); }}, i + 1)));
-      }
-      settle(); w.draw();
+      edges.length = 0;
+      edges.push(...every.filter(e => tr.edge(e[0], e[1])));
+      w.light(tr);
+      const shown = Object.keys(cards).filter(id => cards[id].classList.contains('on'));
+      Object.keys(cards).forEach(id => { cards[id].hidden = !shown.includes(id); });
+      const {cols, edges: roads} = arrange(shown, edges, tr.order);
+      edges.length = 0;
+      edges.push(...roads);
+      gap = Math.max(56, Math.min(120, 40 + 10 * Math.max(1, ...cols.map(c => new Set(roads.filter(e => c.includes(e[1])).map(e => e[0])).size))));   // one lane per box whose roads enter the column
+      inner.style.setProperty('--cg', gap + 'px');
+      inner.style.setProperty('--cw', Math.max(150, Math.min(230, Math.floor((avail - (cols.length - 1) * gap) / cols.length))) + 'px');
+      colsEl.replaceChildren(...cols.map(c => el('div', {class:'col'}, c.map(id => cards[id]))));
+      w.draw();
     },
     ping: (p, on) => { if (cards[p]) cards[p].classList.toggle('ping', on); },
     play(seq, done) {                              // a dot rides each line of the journey in turn
@@ -782,7 +806,7 @@ function flowView(j0, k0) {
   let cur = null, tr = null, fresh = true;
   const sj = all[j0] ? j0 : 0, sk = all[sj].routes[k0] ? k0 : -1;
   shownRun = sj;
-  const map = mapParts.size ? lanes(p => cur && cur.jumpPart(p), !solo) : null;
+  const map = mapParts.size ? lanes(!solo) : null;
   const detail = el('div', {}), jrs = [];
 
   const mk = (j, k, ...kids) => {
@@ -799,7 +823,7 @@ function flowView(j0, k0) {
     });
     return [...by.values()].map(g => {
       const d = el('details', {class:'grp'}, el('summary', {}, el('span', {title:g.label}, g.label), el('i', {}, g.ks.length)));
-      d.open = total <= 14;
+      d.open = P.routes.length <= 14;
       g.ks.forEach(k => {
         const r = P.routes[k], b = mk(j, k, el('span', {class:'verb'}, r.verb), el('code', {title:`${r.f}:${r.line}`}, r.path));
         b.grp = d; d.append(b);
@@ -814,10 +838,14 @@ function flowView(j0, k0) {
   };
   const rail = el('nav', {class:'rail', 'aria-label':'Journeys'},
     total > 8 ? el('input', {class:'find', type:'search', placeholder:'Find a request', 'aria-label':'Find a request', oninput:e => filter(e.target.value)}) : null,
-    el('h3', {}, all.length > 1 ? 'Programs' : 'Program'),
-    all.map((P, j) => mk(j, -1, svg('flag', 14), el('span', {}, P.name))),
-    all.flatMap((P, j) => P.routes.length ? [el('h3', {}, all.length > 1 ? 'Web requests: ' + P.name : 'Web requests'), ...routesOf(P, j)] : []));
-  const pick = el('select', {class:'pick', 'aria-label':'Pick a journey', onchange:e => { const [j, k] = e.target.value.split('/').map(Number); choose(j, k); }},
+    all.length > 1 ? el('select', {class:'rail-pick', 'aria-label':'Pick a program', onchange:e => choose(+e.target.value, -1)},
+      all.map((P, j) => el('option', {value:j}, P.name))) : el('h3', {}, 'Program'),
+    all.map((P, j) => el('div', {class:'prog'},   // only the picked program's journeys are shown (see show)
+      mk(j, -1, svg('flag', 14), el('span', {}, all.length > 1 ? 'Whole program' : P.name)),
+      P.routes.length ? [el('h3', {}, 'Web requests'), ...routesOf(P, j)] : null)));
+  rail.querySelectorAll('.prog').forEach((b, j) => { b.dataset.j = j; });
+  const railPick = rail.querySelector('.rail-pick');
+  const pick =el('select', {class:'pick', 'aria-label':'Pick a journey', onchange:e => { const [j, k] = e.target.value.split('/').map(Number); choose(j, k); }},
     all.flatMap((P, j) => [el('option', {value:`${j}/-1`}, P.name), ...P.routes.map((r, k) => el('option', {value:`${j}/${k}`}, `${r.verb} ${r.path}`))]));
 
   const show = (j, k) => {
@@ -829,6 +857,8 @@ function flowView(j0, k0) {
       if (on) { b.setAttribute('aria-current', 'true'); if (b.grp) b.grp.open = true; if (!fresh) b.scrollIntoView({block:'nearest'}); } else b.removeAttribute('aria-current');
     });
     pick.value = `${j}/${k}`;
+    if (railPick) railPick.value = j;
+    rail.querySelectorAll('.prog').forEach(b => { b.hidden = +b.dataset.j !== j; });
     if (map) map.el.querySelectorAll('.node.run').forEach(c => { if (c.dataset.id === 'run:' + j) c.setAttribute('aria-current', 'true'); else c.removeAttribute('aria-current'); });
     cur = r ? (r.steps.length ? outline(r.steps, 2, 'r' + k + '-', map && map.ping) : null) : outline(F.steps, 3, 's', map && map.ping);
     const play = el('button', {class:'play', onclick:() => { play.disabled = true; map.play(tr.seq, () => { play.disabled = false; }); }}, '▶ Play');
@@ -856,9 +886,9 @@ function flowView(j0, k0) {
 
   f.append(el('section', {class:'intro'}, el('h1', {}, 'How it runs'),
     el('p', {class:'lead'}, solo ? 'Follow the program from where it starts to where it ends.'
-      : 'Pick a program or a web request. The boxes it passes through light up on the map, numbered in the order it reaches them.')));
+      : 'Pick a program or a web request. The map shows only the parts it passes through, and its steps are listed below.')));
   const pane = el('div', {class:'pane'}, solo ? null : pick,
-    map ? [sec('The map', 'The whole codebase as a small city. Each box is a building and its kind says what it does. Roads run from a part to the parts it calls, and cars drive the way the calls go; dotted paths lead to parts the framework loads or that are imported but not called. Hover a building to follow its roads, click it to open it, or click a number to see its first step.'), map.legend, map.el] : null,
+    map ? [sec('The map', 'The parts this journey passes through, as a small city. Each box is a building and its kind says what it does. Boxes run left to right in the order the calls reach them, and each one appears once, below the box that first calls it; the steps list every call. Roads run from a part to the parts it calls, and cars drive the way the calls go; dotted paths lead to parts the framework loads or that are imported but not called. Hover a building to follow its roads, or click it to open it.'), map.legend, map.el] : null,
     detail);
   show(sj, sk);
   if (D.flow.unreached.length) pane.append(sec('Not on any journey', 'Nothing above starts or loads these. They run some other way (a separate command, the framework itself) or are not used.'), grid(D.flow.unreached, true));
