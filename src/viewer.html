@@ -99,22 +99,34 @@ footer{max-width:1120px;margin:0 auto;padding:0 24px 40px;color:var(--ink3);font
 .edges .e{stroke-width:2;opacity:.5}
 .edges .e.conv{stroke-dasharray:5 5}
 .edges .tip{opacity:.6;stroke:none}
+.inner.traced .e:not(.on),.inner.traced .tip:not(.on){opacity:.06}
+.inner.traced .e.on{opacity:.9;stroke-width:3px}
+.inner.traced .tip.on{opacity:1}
+.inner.traced .node:not(.on){opacity:.45}
 .inner.focus .e:not(.hl),.inner.focus .tip:not(.hl){opacity:.08}
 .inner.focus .e.hl,.inner.focus .tip.hl{opacity:1}
 .inner.focus .node:not(.rel){opacity:.5}
+.inner.focus .node.rel{opacity:1}
+.edges .dot{stroke:#fff;stroke-width:2.5}
 
 .node{--c:#4f5bd5;position:relative;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;width:100%;text-align:left;background:#fff;border:1.5px solid var(--line);
   border-left:6px solid var(--c);border-radius:10px;padding:11px 14px 11px;transition:background .12s,border-color .12s,opacity .15s}
 .node:hover{background:color-mix(in srgb,var(--c) 7%,#fff);border-color:var(--c)}
 .map .col{justify-content:flex-start}   /* a long column of parts would push short ones far down the page */
 .node.run[aria-current=true]{background:color-mix(in srgb,var(--ink) 8%,#fff);border-color:var(--ink)}
-.graph.wide{--w:min(1600px,calc(100vw - 48px));width:var(--w);margin-left:min(0px,calc((100% - var(--w)) / 2))}
+.node[hidden]{display:none}
+.node.ping{box-shadow:0 0 0 4px color-mix(in srgb,var(--c) 40%,transparent);opacity:1!important}
+.stop{position:absolute;bottom:7px;right:8px;min-width:22px;height:22px;padding:0 5px;border-radius:99px;background:var(--ink);color:#fff;
+  font:700 12px/22px var(--mono);text-align:center}
+.node:has(.stop) .ms{padding-right:30px}
+.more{border:1.5px dashed var(--line);background:none;border-radius:10px;padding:5px;font-size:13px;color:var(--ink2)}
+.more:hover{border-color:var(--ink3);color:var(--ink)}
 .lanes .node{padding:7px 10px;border-left-width:5px}
 .lanes .nm{font-size:14px}
 .lanes .ms{font-size:11.5px}
 .lanes .edges .e{opacity:.2;stroke-width:1.4px}
 .lanes.focus .edges .e.hl{opacity:1;stroke-width:2.4px}
-.lanes{display:grid;column-gap:36px}
+.lanes{display:grid;column-gap:28px}
 .lhead{font:650 12px var(--body);color:var(--ink3);text-transform:uppercase;letter-spacing:.05em;padding:0 2px 8px}
 .lcell{display:flex;flex-direction:column;justify-content:center;gap:12px;padding:14px 0;border-top:1.5px solid var(--line);min-width:0}
 .lname{font:600 13px var(--body);color:var(--ink3)}
@@ -175,14 +187,33 @@ button.tg[aria-expanded=true]{transform:rotate(90deg)}
 .sdoc2{color:var(--ink2);font-size:13px;margin:1px 0 0 28px;overflow-wrap:anywhere}
 .sm{color:var(--ink3);font-size:13px}
 .st .bd>.sm{margin-left:28px}
-.reqs{display:flex;flex-direction:column;gap:10px}
-.req{background:#fff;border:1.5px solid var(--line);border-radius:14px;overflow:hidden}
-.req summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:10px 16px;cursor:pointer;list-style:none}
-.req summary::-webkit-details-marker{display:none}
-.req[open] summary{border-bottom:1.5px solid var(--line)}
-.req .steps{border:0;border-radius:0}
 .verb{font:700 11.5px var(--mono);color:#fff;background:var(--ink);border-radius:5px;padding:1px 7px}
-.req code{font:500 14px var(--mono);overflow-wrap:anywhere}
+.rpath{font:600 clamp(20px,3vw,28px)/1.2 var(--mono);overflow-wrap:anywhere}
+
+/* how it runs: the journeys on the left; the map and the picked journey's steps on the right */
+.trace{--w:min(1600px,calc(100vw - 48px));width:var(--w);margin-left:min(0px,calc((100% - var(--w)) / 2));
+  display:grid;grid-template-columns:240px minmax(0,1fr);gap:24px;align-items:start;margin-top:8px}
+.trace .graph.wide{width:auto;margin-left:-2px}
+.trace.solo{grid-template-columns:minmax(0,1fr)}
+.pane>.sec:first-child{margin-top:12px}
+.rail{position:sticky;top:70px;max-height:calc(100vh - 86px);overflow:auto;background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:8px}
+.rail h3{font:650 12px var(--body);color:var(--ink3);text-transform:uppercase;letter-spacing:.05em;padding:10px 8px 6px}
+.find{width:100%;font:inherit;font-size:14px;padding:6px 10px;border:1.5px solid var(--line);border-radius:8px;background:var(--paper);margin-bottom:4px}
+.jr{display:flex;align-items:center;gap:8px;width:100%;min-width:0;border:0;background:none;text-align:left;padding:5px 8px;border-radius:7px;font-size:14px}
+.jr:hover{background:var(--paper)}
+.jr[aria-current]{background:var(--ink);color:#fff}
+.jr[hidden],.grp[hidden]{display:none}
+.jr span:last-child,.jr code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jr code{font:500 13px var(--mono)}
+.jr .verb{flex:none;min-width:50px;text-align:center;font-size:10.5px}
+.jr[aria-current] .verb{background:#fff;color:var(--ink)}
+.grp summary{display:flex;gap:8px;align-items:center;padding:6px 8px 2px;cursor:pointer;font:600 12.5px var(--mono);color:var(--ink2)}
+.grp summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grp summary i{margin-left:auto;font:600 11.5px var(--body);font-style:normal;color:var(--ink3)}
+.pick{display:none;margin-bottom:12px;width:100%;font:inherit;padding:8px 10px;border:1.5px solid var(--line);border-radius:10px;background:#fff}
+.play{margin-left:auto;border:1.5px solid var(--ink);background:var(--ink);color:#fff;border-radius:99px;padding:3px 14px;font:600 13.5px var(--body)}
+.play:hover{background:#1f3158}
+.play:disabled{opacity:.5;cursor:default}
 
 /* motion that answers a click: zoom in when going deeper, out when going up */
 .view.zin{animation:zin .24s cubic-bezier(.2,.7,.2,1)}
@@ -191,6 +222,9 @@ button.tg[aria-expanded=true]{transform:rotate(90deg)}
 @keyframes zout{from{opacity:0;transform:scale(1.03)}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
+@media (max-width:900px){
+  .trace{grid-template-columns:minmax(0,1fr)}.rail{display:none}.pick{display:block}
+}
 @media (max-width:720px){
   main{padding:16px 16px 60px}.top .in{padding:0 16px}.repo{display:none}
   .station{width:40px;height:40px;margin-left:10px}
@@ -323,13 +357,21 @@ function layout(ids, edges) {
 }
 
 const isIo = id => id.startsWith('io:'), isRun = id => id.startsWith('run:');
+const mapParts = new Set(D.flow ? D.flow.map.parts.filter(id => N[id]) : []);
+const partOf = f => { for (let c = f; c && N[c]; c = N[c].parent) if (mapParts.has(c)) return c; return null; };   // the box on the map a file sits in
+let quiet = false, onPick = null;   // picking a journey redraws the page in place; the address still changes so back works
+function choose(j, k) {
+  const h = '#/' + encodeURIComponent('@flow/' + j + (k >= 0 ? '/' + k : ''));
+  if (location.hash !== h) { quiet = true; setTimeout(() => { quiet = false; }, 100); location.hash = h; }
+  if (onPick) onPick(j, k); else render();
+}
 const ioKey = id => id.slice(3).split('@')[0];   // io:db@2 is the database box of row 2
 const tint = id => isRun(id) ? 'var(--ink)' : isIo(id) ? WAY[IO[ioKey(id)][1]] : colorOf(N[id]);
 let shownRun = 0;   // the program whose steps are listed below the map
 function card(id, showPath) {
   if (isRun(id)) {                        // a program: where its journey starts; opens its steps
     const j = +id.slice(4), P = D.flow.processes[j];
-    return el('button', {class:'node run', style:`--c:var(--ink)`, 'data-id':id, 'aria-current': j === shownRun ? 'true' : null, onclick:() => go('@flow/' + j)},
+    return el('button', {class:'node run', style:`--c:var(--ink)`, 'data-id':id, 'aria-current': j === shownRun ? 'true' : null, onclick:() => choose(j, -1)},
       el('div', {class:'nm'}, svg('flag', 18), el('span', {}, P.name)),
       P.command ? el('div', {class:'pth', title:P.command}, P.command) : null,
       el('p', {class:'ds'}, 'Program. Click to follow its steps.'));
@@ -368,22 +410,24 @@ function graph({cols, edges, showPath}) {
 // the connecting lines: drawn over the laid-out cards, redrawn when the size changes, and lit by hovering a card
 function wire(inner, sv, cards, edges) {
   const drawn = [];
+  let lit = null;   // the journey picked on the left: its lines stay strong, the rest fade
   const draw = () => {
     sv.replaceChildren(); drawn.length = 0;
     sv.setAttribute('width', inner.scrollWidth); sv.setAttribute('height', inner.scrollHeight);
     for (const [a, b, wt, cv] of edges) {   // cv: the framework loads b by convention, no code imports it
       const ea = cards[a], eb = cards[b];
-      if (!ea || !eb) continue;
+      if (!ea || !eb || ea.hidden || eb.hidden) continue;
+      const on = lit && lit.edge(a, b) ? ' on' : '';
       const x1 = ea.offsetLeft + ea.offsetWidth, y1 = ea.offsetTop + ea.offsetHeight / 2;
       const y2 = eb.offsetTop + eb.offsetHeight / 2, back = eb.offsetLeft < x1 + 4;   // back: the line returns to a part in the same or an earlier column
       const x2 = back ? eb.offsetLeft + eb.offsetWidth + 7 : eb.offsetLeft - 7, dx = back ? 44 : Math.max(36, (x2 - x1) / 2);
       const col = tint(a);
       const p = document.createElementNS(NS, 'path');
-      p.setAttribute('class', cv ? 'e conv' : 'e'); p.style.stroke = col;
+      p.setAttribute('class', (cv ? 'e conv' : 'e') + on); p.style.stroke = col;
       p.setAttribute('stroke-width', (1.6 + Math.min(2.4, Math.log2((wt || 1) + 1) * 0.55)).toFixed(2));
       p.setAttribute('d', back ? `M${x1},${y1} C${x1 + dx},${y1} ${x2 + dx},${y2} ${x2},${y2}` : `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
       const t = document.createElementNS(NS, 'path');
-      t.setAttribute('class', 'tip'); t.style.fill = col;
+      t.setAttribute('class', 'tip' + on); t.style.fill = col;
       t.setAttribute('d', back ? `M${x2 - 5},${y2} l9,-5.5 l0,11 z` : `M${x2 + 5},${y2} l-9,-5.5 l0,11 z`);
       sv.append(p, t); drawn.push({a, b, p, t});
     }
@@ -400,6 +444,14 @@ function wire(inner, sv, cards, edges) {
   });
   new ResizeObserver(draw).observe(inner);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
+  return {sv, drawn, draw,
+    light: L => {                           // L: {edge(a, b), nodes}; the caller redraws once the cards have settled
+      lit = L; inner.classList.add('traced');
+      const on = new Set(L.nodes);
+      edges.forEach(([a, b]) => { if (L.edge(a, b)) { on.add(a); on.add(b); } });
+      Object.entries(cards).forEach(([k, c]) => c.classList.toggle('on', on.has(k)));
+    },
+    clear: () => { lit = null; inner.classList.remove('traced'); Object.values(cards).forEach(c => c.classList.remove('on')); }};
 }
 const grid = (ids, showPath) => el('div', {class:'grid'}, ids.map(id => card(id, showPath)));
 
@@ -501,8 +553,15 @@ function ioPills(keys) {
   return (keys || []).filter(k => IO[k]).map(k => el('span', {class:'iop', style:`--k:${WAY[IO[k][1]]}`, title:SAYS[IO[k][1]]}, IO[k][0]));
 }
 // steps in the order the code runs them; a step's own steps follow it, one level deeper (d)
-function outline(steps, open, prefix) {
-  const ol = el('ol', {class:'steps'}), rows = [];
+const TAGS = {loads:'loaded, not called', dispatch:'depends on the object it is called on', ref:'handed over, runs later', middleware:'runs before the handler'};
+function outline(steps, open, prefix, hover) {   // hover(part, on): lets the map light the box a step belongs to
+  const ol = el('ol', {class:'steps'}), rows = [], first = {};
+  const raw = steps.map(s => TAGS[s.k] || (s.guess ? 'guessed from the name' : null)), up = [];
+  const tags = raw.map((t, i) => {                 // a tag covers the steps indented under it, so say it once
+    const d = steps[i].d, p = d > 0 ? up[d - 1] : undefined;
+    up[d] = i; up.length = d + 1;
+    return p !== undefined && t && t === raw[p] ? null : t;
+  });
   const show = () => {                     // a row is hidden while a step above it is folded
     let cut = Infinity;
     rows.forEach((r, i) => {
@@ -524,7 +583,9 @@ function outline(steps, open, prefix) {
     const r = el('li', {class:'st k-' + s.k + (s.guess ? ' guess' : ''), id:prefix + (i + 1), style:`--c:${n ? colorOf(n) : 'var(--ink3)'};--d:${s.d}`});
     r.tg = inner ? el('button', {class:'tg', 'aria-label':'Show or hide the steps inside', onclick:() => { fold(r, !r.closed); show(); }}, '▸') : el('span', {class:'tg'});
     fold(r, inner && s.d >= open);
-    const tag = {loads:'loaded, not called', dispatch:'depends on the object it is called on', ref:'handed over, runs later', middleware:'runs before the handler'}[s.k] || (s.guess ? 'guessed from the name' : null);
+    const tag = tags[i], part = partOf(s.f);
+    if (part && first[part] === undefined) first[part] = i;
+    if (hover && part) { r.addEventListener('mouseenter', () => hover(part, true)); r.addEventListener('mouseleave', () => hover(part, false)); }
     const line = s.k === 'more' ? [r.tg, el('span', {class:'sm'}, `+${num(s.more)} more steps not shown`)]
       : [r.tg, el('button', {class:'sn', title:s.f, onclick:() => go(s.f)}, s.n), el('span', {class:'sw'}, `${s.f.split('/').pop()}:${s.line}`),
          tag ? el('span', {class:'tag'}, tag) : null,
@@ -537,13 +598,35 @@ function outline(steps, open, prefix) {
     rows.push(r); ol.append(r);
   });
   show();
+  ol.jumpPart = p => { if (first[p] !== undefined) jump(first[p]); };
   return ol;
 }
+// the boxes a journey passes through, in the order it first reaches them, and the lines it takes between them
+function trace(steps, extra, io, j) {
+  const order = [], seen = new Set(), pairs = new Set(), seq = [], stk = [];
+  const visit = p => { if (!seen.has(p)) { seen.add(p); order.push(p); } };
+  for (const s of steps) {
+    const p = s.k === 'more' ? null : partOf(s.f);
+    if (!p) continue;
+    stk.length = Math.min(stk.length, s.d);
+    let q; for (let i = s.d - 1; i >= 0 && !q; i--) q = stk[i];   // the box of the step this one happens inside
+    if (q && q !== p && !pairs.has(q + '>' + p)) { pairs.add(q + '>' + p); seq.push([q, p]); }
+    stk[s.d] = p; visit(p);
+  }
+  extra.forEach(f => { const p = partOf(f); if (p) visit(p); });   // a request with no steps still has its handler
+  const keys = new Set(io), run = 'run:' + j;
+  const edge = (a, b) => pairs.has(a + '>' + b)
+    || (a === run && seen.has(b)) || (b === run && seen.has(a))
+    || (isIo(a) && keys.has(ioKey(a)) && seen.has(b)) || (isIo(b) && keys.has(ioKey(b)) && seen.has(a));
+  return {order, seq, edge, nodes: [...order, run]};
+}
+
 // one map of the whole codebase. A row per program (parts only it runs), then a row for parts several programs share;
 // columns are fixed: what comes in, where the program starts, one per layer, what goes out. Dashed lines are parts that
-// are loaded or imported but not called.
-function lanes() {
-  const M = D.flow.map, P = D.flow.processes, has = new Set(M.parts.filter(id => N[id])), owner = {};
+// are loaded or imported but not called. One journey at a time can be lit: its boxes are numbered, the rest fade.
+const CAP = 6;   // a crowded cell shows this many boxes and folds the rest behind "+N more"
+function lanes(onStop, railed) {
+  const M = D.flow.map, P = D.flow.processes, has = mapParts, owner = {};
   M.lanes.forEach((us, j) => us.forEach(u => { if (has.has(u)) owner[u] = u in owner ? -1 : j; }));
   has.forEach(u => { if (!(u in owner)) owner[u] = -1; });
   const rows = P.map((_, j) => j);
@@ -574,58 +657,170 @@ function lanes() {
   const edges = [...M.edges.filter(e => has.has(e[0]) && has.has(e[1])), ...links];
   const inner = el('div', {class:'inner lanes'}), sv = document.createElementNS(NS, 'svg');
   sv.setAttribute('class', 'edges');
-  const avail = innerWidth - 48;   // the map may use the whole window, not just the page column
-  inner.style.setProperty('--cw', Math.max(150, Math.min(230, Math.floor((avail - (cols.length - 1) * 36) / cols.length))) + 'px');
+  const avail = Math.min(innerWidth - 48, 1600) - (railed && innerWidth > 900 ? 264 : 0);   // the map may use the whole window, less the list of journeys
+  inner.style.setProperty('--cw', Math.max(130, Math.min(230, Math.floor((avail - (cols.length - 1) * 28) / cols.length))) + 'px');
   inner.style.gridTemplateColumns = `repeat(${cols.length}, var(--cw))`;
   inner.append(sv);
   const head = c => c === 'in' ? 'Comes in' : c === 'start' ? 'Starts' : c === 'out' ? 'Goes out' : LK[c].name;
   cols.forEach((c, i) => inner.append(el('div', {class:'lhead', style:`grid-row:1;grid-column:${i + 1}`}, head(c))));
-  rows.forEach((r, ri) => cols.forEach((c, ci) => inner.append(el('div', {class:'lcell', style:`grid-row:${ri + 2};grid-column:${ci + 1}`},
-    r === -1 && c === 'start' ? el('div', {class:'lname'}, 'Used by more than one program') : null,
-    (cell[r + '|' + c] || []).sort((a, b) => (rank[a] ?? -1) - (rank[b] ?? -1)).map(id => cards[id])))));
-  wire(inner, sv, cards, edges);
-  return el('div', {class:'graph wide'}, inner);
+  const caps = [];
+  let w = null;
+  const settle = () => caps.forEach(c => {         // the boxes on the lit journey are never folded away
+    let hid = 0;
+    c.ids.forEach((id, i) => {
+      const h = !(c.open || i < CAP || isRun(id) || cards[id].classList.contains('on'));
+      cards[id].hidden = h; if (h) hid++;
+    });
+    c.btn.hidden = !hid && !c.open;
+    c.btn.textContent = c.open ? 'Show fewer' : `+${hid} more`;
+  });
+  rows.forEach((r, ri) => cols.forEach((c, ci) => {
+    const ids = (cell[r + '|' + c] || []).sort((a, b) => (rank[a] ?? -1) - (rank[b] ?? -1));
+    const cap = ids.length > CAP + 2 ? {ids, open:false, btn:el('button', {class:'more', onclick:() => { cap.open = !cap.open; settle(); w.draw(); }})} : null;
+    if (cap) caps.push(cap);
+    inner.append(el('div', {class:'lcell', style:`grid-row:${ri + 2};grid-column:${ci + 1}`},
+      r === -1 && c === 'start' && P.length > 1 ? el('div', {class:'lname'}, 'Used by more than one program') : null,
+      ids.map(id => cards[id]), cap && cap.btn));
+  }));
+  settle();
+  w = wire(inner, sv, cards, edges);
+  let token = 0;   // a new journey, or a redraw, ends an animation in progress
+  return {
+    el: el('div', {class:'graph wide'}, inner),
+    light(tr) {
+      token++;
+      inner.querySelectorAll('.stop').forEach(s => s.remove());
+      if (!tr) w.clear();
+      else {
+        w.light(tr);
+        tr.order.forEach((p, i) => cards[p] && cards[p].append(el('span', {class:'stop', title:'Show its first step', onclick:e => { e.stopPropagation(); onStop(p); }}, i + 1)));
+      }
+      settle(); w.draw();
+    },
+    ping: (p, on) => { if (cards[p]) cards[p].classList.toggle('ping', on); },
+    play(seq, done) {                              // a dot rides each line of the journey in turn
+      const my = ++token;
+      const paths = seq.map(([a, b]) => w.drawn.find(d => d.a === a && d.b === b)).filter(Boolean).map(d => d.p);
+      if (!paths.length) return done();
+      const dot = document.createElementNS(NS, 'circle');
+      dot.setAttribute('class', 'dot'); dot.setAttribute('r', 7); dot.style.fill = 'var(--ink)';
+      sv.append(dot);
+      let i = 0, t0 = null;
+      const tick = ts => {
+        const p = paths[i];
+        if (my !== token || !p.isConnected) { dot.remove(); return done(); }
+        if (t0 === null) t0 = ts;
+        const f = Math.min(1, (ts - t0) / 650), pt = p.getPointAtLength(f * p.getTotalLength());
+        dot.setAttribute('cx', pt.x); dot.setAttribute('cy', pt.y);
+        if (f < 1) return requestAnimationFrame(tick);
+        t0 = null;
+        if (++i < paths.length) requestAnimationFrame(tick); else { dot.remove(); done(); }
+      };
+      requestAnimationFrame(tick);
+    }
+  };
 }
-function flowView(i) {
-  const all = D.flow.processes, F = all[i] || all[0], f = document.createDocumentFragment();
-  shownRun = all.indexOf(F);
-  f.append(el('section', {class:'intro'}, el('h1', {}, 'How it runs')));
-  if (D.flow.map.parts.some(id => N[id])) {
-    f.append(sec('The map', 'The whole codebase in one picture. One row per program, then a row for parts several programs use. Columns run from what comes in, through where the program starts and each layer, to what goes out. Solid lines run from a part to the parts it calls; dashed lines are parts the framework loads or that are imported but not called. Hover a box to follow its lines. Click a part to open it, or a program to follow its steps below.'));
-    f.append(lanes());
-  }
-  f.append(el('section', {class:'intro', style:'margin-top:28px'},
-    all.length > 1 ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Programs'),
-      all.map((P, j) => el('button', {class:'ref', style:'--c:var(--ink)', 'aria-current': P === F ? 'true' : null, onclick:() => go('@flow/' + j)}, el('i'), P.name))) : null,
-    el('p', {class:'lead'}, F.narrative),
-    F.command ? el('p', {class:'path'}, F.command) : null,
-    F.chain.length ? el('div', {class:'lrow', style:'margin-top:16px'}, el('span', {class:'lt'}, 'Started by'), F.chain.map(id => ref(id))) : null,
-    el('div', {class:'lrow', style:F.chain.length ? null : 'margin-top:16px'}, el('span', {class:'lt'}, D.flow.kind === 'Entry points' ? 'Starting files' : 'Front door'),
-      F.entries.map(id => ref(id))),
-    ioRow('Takes in', Object.keys(F.io || {}), 'in', F.io), ioRow('Gives out', Object.keys(F.io || {}), 'out', F.io),
-    F.parts.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Passes through'), chips(F.parts, 16)) : null));
-  f.append(sec('Step by step' + (all.length > 1 ? ': ' + F.name : ''), 'One line per step, in the order the code runs. Indented steps happen inside the step above. Click a name to open its file.'));
-  f.append(outline(F.steps, 3, 's'));
-  if (F.routes.length) {
-    f.append(sec('Web requests', 'What happens when each kind of request arrives. Click one to follow it.'));
-    f.append(el('div', {class:'reqs'}, F.routes.map((r, k) => el('details', {class:'req'},
-      el('summary', {}, el('span', {class:'verb'}, r.verb), el('code', {}, r.path), el('span', {class:'sw'}, `${r.f.split('/').pop()}:${r.line}`), ioPills(r.io)),
-      r.steps.length ? outline(r.steps, 2, `r${k}-`) : el('p', {class:'empty'}, 'No code of this project runs for it: the framework or an outside library answers it.')))));
-  }
-  if (D.flow.unreached.length) {
-    f.append(sec('Not on any journey', 'Nothing above starts or loads these. They run some other way (a separate command, the framework itself) or are not used.'));
-    f.append(grid(D.flow.unreached, true));
-  }
+
+// the page: journeys on the left, then the map, then the steps of the one picked. Picking redraws in place (see choose).
+function flowView(j0, k0) {
+  const all = D.flow.processes, f = document.createDocumentFragment();
+  const total = all.reduce((a, P) => a + P.routes.length, 0), solo = all.length === 1 && !total;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let cur = null, tr = null, fresh = true;
+  const sj = all[j0] ? j0 : 0, sk = all[sj].routes[k0] ? k0 : -1;
+  shownRun = sj;
+  const map = mapParts.size ? lanes(p => cur && cur.jumpPart(p), !solo) : null;
+  const detail = el('div', {}), jrs = [];
+
+  const mk = (j, k, ...kids) => {
+    const b = el('button', {class:'jr', onclick:() => choose(j, k)}, ...kids);
+    b.dataset.j = j; b.dataset.k = k; jrs.push(b);
+    return b;
+  };
+  const routesOf = (P, j) => {                     // requests grouped by the folder of their address; bare ones by the file that serves them
+    const by = new Map();
+    P.routes.forEach((r, k) => {
+      const dir = r.path.includes('/') ? r.path.slice(0, r.path.lastIndexOf('/')) : '', key = dir || 'file:' + r.f;
+      if (!by.has(key)) by.set(key, {label: dir || r.f.split('/').pop(), ks: []});
+      by.get(key).ks.push(k);
+    });
+    return [...by.values()].map(g => {
+      const d = el('details', {class:'grp'}, el('summary', {}, el('span', {title:g.label}, g.label), el('i', {}, g.ks.length)));
+      d.open = total <= 14;
+      g.ks.forEach(k => {
+        const r = P.routes[k], b = mk(j, k, el('span', {class:'verb'}, r.verb), el('code', {title:`${r.f}:${r.line}`}, r.path));
+        b.grp = d; d.append(b);
+      });
+      return d;
+    });
+  };
+  const filter = q => {
+    q = q.trim().toLowerCase();
+    jrs.forEach(b => { b.hidden = !!q && b.dataset.k !== '-1' && !b.textContent.toLowerCase().includes(q); });
+    rail.querySelectorAll('.grp').forEach(g => { const any = [...g.querySelectorAll('.jr')].some(b => !b.hidden); g.hidden = !any; if (q && any) g.open = true; });
+  };
+  const rail = el('nav', {class:'rail', 'aria-label':'Journeys'},
+    total > 8 ? el('input', {class:'find', type:'search', placeholder:'Find a request', 'aria-label':'Find a request', oninput:e => filter(e.target.value)}) : null,
+    el('h3', {}, all.length > 1 ? 'Programs' : 'Program'),
+    all.map((P, j) => mk(j, -1, svg('flag', 14), el('span', {}, P.name))),
+    all.flatMap((P, j) => P.routes.length ? [el('h3', {}, all.length > 1 ? 'Web requests: ' + P.name : 'Web requests'), ...routesOf(P, j)] : []));
+  const pick = el('select', {class:'pick', 'aria-label':'Pick a journey', onchange:e => { const [j, k] = e.target.value.split('/').map(Number); choose(j, k); }},
+    all.flatMap((P, j) => [el('option', {value:`${j}/-1`}, P.name), ...P.routes.map((r, k) => el('option', {value:`${j}/${k}`}, `${r.verb} ${r.path}`))]));
+
+  const show = (j, k) => {
+    const F = all[j], r = k >= 0 ? F.routes[k] : null;
+    shownRun = j;
+    tr = trace(r ? r.steps : F.steps, r ? [r.f] : [], r ? r.io || [] : Object.keys(F.io || {}), j);
+    jrs.forEach(b => {
+      const on = +b.dataset.j === j && +b.dataset.k === k;
+      if (on) { b.setAttribute('aria-current', 'true'); if (b.grp) b.grp.open = true; if (!fresh) b.scrollIntoView({block:'nearest'}); } else b.removeAttribute('aria-current');
+    });
+    pick.value = `${j}/${k}`;
+    if (map) map.el.querySelectorAll('.node.run').forEach(c => { if (c.dataset.id === 'run:' + j) c.setAttribute('aria-current', 'true'); else c.removeAttribute('aria-current'); });
+    cur = r ? (r.steps.length ? outline(r.steps, 2, 'r' + k + '-', map && map.ping) : null) : outline(F.steps, 3, 's', map && map.ping);
+    const play = el('button', {class:'play', onclick:() => { play.disabled = true; map.play(tr.seq, () => { play.disabled = false; }); }}, '▶ Play');
+    const head = r
+      ? [el('p', {}, el('button', {class:'crumb', onclick:() => choose(j, -1)}, '← ' + F.name)),
+         el('div', {class:'hline'}, el('span', {class:'verb'}, r.verb), el('h2', {class:'rpath'}, r.path)),
+         el('p', {class:'path'}, `${r.f}:${r.line}`),
+         ioRow('Takes in', r.io, 'in'), ioRow('Gives out', r.io, 'out')]
+      : [el('p', {class:'lead'}, F.narrative),
+         F.command ? el('p', {class:'path'}, F.command) : null,
+         F.chain.length ? el('div', {class:'lrow', style:'margin-top:16px'}, el('span', {class:'lt'}, 'Started by'), F.chain.map(id => ref(id))) : null,
+         el('div', {class:'lrow', style:F.chain.length ? null : 'margin-top:16px'}, el('span', {class:'lt'}, D.flow.kind === 'Entry points' ? 'Starting files' : 'Front door'),
+           F.entries.map(id => ref(id))),
+         ioRow('Takes in', Object.keys(F.io || {}), 'in', F.io), ioRow('Gives out', Object.keys(F.io || {}), 'out', F.io),
+         F.parts.length ? el('div', {class:'lrow'}, el('span', {class:'lt'}, 'Passes through'), chips(F.parts, 16)) : null];
+    const sh = sec(r ? 'What runs for this request' : 'Step by step' + (all.length > 1 ? ': ' + F.name : ''),
+      'One line per step, in the order the code runs. Indented steps happen inside the step above, and a tag covers the steps under it. Click a name to open its file.');
+    if (map && !reduce && tr.seq.length) sh.append(play);
+    detail.replaceChildren(el('section', {class:'intro', style:'margin-top:22px'}, head), sh,
+      cur || el('p', {class:'empty'}, 'No code of this project runs for it: the framework or an outside library answers it.'));
+    if (map) map.light(tr);
+    fresh = false;
+  };
+  onPick = show;
+
+  f.append(el('section', {class:'intro'}, el('h1', {}, 'How it runs'),
+    el('p', {class:'lead'}, solo ? 'Follow the program from where it starts to where it ends.'
+      : 'Pick a program or a web request. The boxes it passes through light up on the map, numbered in the order it reaches them.')));
+  const pane = el('div', {class:'pane'}, solo ? null : pick,
+    map ? [sec('The map', 'The whole codebase in one picture. Columns run from what comes in, through where the program starts and each layer, to what goes out. Solid lines run from a part to the parts it calls; dashed lines are parts the framework loads or that are imported but not called. Hover a box to follow its lines, click it to open it, or click a number to see its first step.'), map.el] : null,
+    detail);
+  show(sj, sk);
+  if (D.flow.unreached.length) pane.append(sec('Not on any journey', 'Nothing above starts or loads these. They run some other way (a separate command, the framework itself) or are not used.'), grid(D.flow.unreached, true));
+  f.append(el('div', {class:'trace' + (solo ? ' solo' : '')}, solo ? null : rail, pane));
   return f;
 }
 
 /* ---------- render ---------- */
 let first = true, lastDepth = 0;
 function render() {
+  onPick = null;
   const id = route(), isFlow = /^@flow(\/|$)/.test(id) && !!D.flow, target = isFlow ? '@flow' : N[id] ? id : '';
   const depth = isFlow ? 1 : target ? chain(target).length + 1 : 0;
   const view = $('view'), crumbs = $('crumbs');
-  view.replaceChildren(isFlow ? flowView(+id.split('/')[1] || 0) : target ? nodeView(N[target]) : overview());
+  view.replaceChildren(isFlow ? flowView(+id.split('/')[1] || 0, id.split('/')[2] != null ? +id.split('/')[2] : -1) : target ? nodeView(N[target]) : overview());
   view.classList.remove('zin', 'zout'); void view.offsetWidth;
   if (!first) view.classList.add(depth < lastDepth ? 'zout' : 'zin');
   first = false; lastDepth = depth;
@@ -646,11 +841,12 @@ function render() {
 
 $('repoName').textContent = R.name;
 $('foot').textContent = `Generated ${R.generated} by repoatlas from the code's syntax: its folders, imports and calls. It is a guide to the shape of the project, not a guarantee, so confirm anything important in the code.`;
-addEventListener('hashchange', render);
+addEventListener('hashchange', () => { if (quiet) quiet = false; else render(); });
 addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || e.target.closest('input,textarea')) return;
-  const id = route();
-  if (/^@flow(\/|$)/.test(id)) go(''); else if (N[id]) { const up = N[id].parent; go(N[up] && N[up].kind !== 'layer' ? up : ''); }
+  if (e.key !== 'Escape' || e.target.closest('input,textarea,select')) return;
+  const id = route(), m = id.match(/^@flow\/(\d+)\/\d+$/);
+  if (m) choose(+m[1], -1);                     // from a request back to its program, then out
+  else if (/^@flow(\/|$)/.test(id)) go(''); else if (N[id]) { const up = N[id].parent; go(N[up] && N[up].kind !== 'layer' ? up : ''); }
 });
 render();
 })();
