@@ -4,7 +4,7 @@
 
 Point `repoatlas` at a repository and it writes one self-contained HTML page: an atlas of the project. Start with the big picture, click any layer or part to zoom in, down to a single function. Then follow each program the project runs, step by step, from where it starts to where it ends. No server, nothing leaves your machine.
 
-![The overview: one floor per layer](examples/overview.png)
+![The About page for full-stack-fastapi-template](examples/overview.png)
 
 ## Install
 
@@ -65,8 +65,8 @@ The page is one file: email it, attach it, or commit it. A finished sample is [e
 
 ## What you see
 
-1. **Overview.** One floor per layer: interface, entry points, logic, data, external services, shared toolkit. Upper floors rely on lower ones.
-2. **A layer.** Its parts, with lines showing who uses whom. Hover a box to follow its connections.
+1. **About.** The home page: what the project is, its size and languages, web endpoints, the programs it runs and the files they start from, and the outside tools it is built with.
+2. **A layer.** Every part of one layer (interface, entry points, logic, data...), with lines showing who uses whom. Hover a box to follow its connections.
 
    ![Inside one layer](examples/layer.png)
 
@@ -75,7 +75,7 @@ The page is one file: email it, attach it, or commit it. A finished sample is [e
 
    ![How it runs](examples/flow.png)
 
-Every box is clickable. Breadcrumbs, Back and `Esc` go up a level.
+Every box is clickable. Breadcrumbs, Back and `Esc` go up a level. The screenshots above come from [examples/example.html](examples/example.html).
 
 ## Languages
 
