@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::parse::{Def, File, Kind};
-use crate::rules::{orm_form, orm_speaks, Orm, ORMS, ORM_JS_SYNTAX};
+use crate::rules::{orm_form, orm_speaks, Orm, ORMS, ORM_IMPORTED_HANDLE_LANGS, ORM_JS_SYNTAX};
 
 /// the ORMs a file is written for: its language, and it mentions one of their libraries
 fn mine(f: &File) -> Vec<(usize, &'static Orm)> {
@@ -21,7 +21,9 @@ fn called_models(f: &File, o: &Orm) -> Vec<String> {
     let Some(calls) = orm_form(o.name).map(|x| x.model_calls).filter(|c| !c.is_empty()) else { return vec![] };
     let names = calls.iter().map(|c| regex::escape(c)).collect::<Vec<_>>().join("|");
     let re = Regex::new(&format!(r#"(?:(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*=\s*)?(?:[\w$]+\.)?\b(?:{names})\s*(?:<[^<>()]*>)?\s*\(\s*['"]([A-Za-z_$][\w$]*)['"]"#)).unwrap();
-    re.captures_iter(&f.bare).map(|c| c.get(1).unwrap_or_else(|| c.get(2).unwrap()).as_str().to_string()).collect()
+    // a model is a class-like name: the variable when it is spelt so, else the name given (`const user = model('User')` is User)
+    let class_like = |m: &regex::Match| m.as_str().starts_with(|c: char| c.is_ascii_uppercase());
+    re.captures_iter(&f.bare).filter_map(|c| c.get(1).filter(class_like).or_else(|| c.get(2).filter(class_like)).map(|m| m.as_str().to_string())).collect()
 }
 
 /// the attribute lines right above a definition and the start of its body: where `#[derive(..)]`, `@Entity`, `gorm.Model` sit
@@ -105,6 +107,10 @@ pub struct Index {
     pub getters: HashMap<String, Vec<Getter>>,
     /// names declared as a session anywhere (a struct field `db: PgPool`): they hold one in the other files too
     pub names: Vec<(String, usize)>,
+    /// where handles travel by import (rules::ORM_IMPORTED_HANDLE_LANGS): (file, handle name it declares, ORM)
+    pub exported: Vec<(String, String, usize)>,
+    /// ... and (file, class it declares that extends a handle type, ORM)
+    pub derived: Vec<(String, String, usize)>,
 }
 
 pub fn index(files: &[File]) -> Index {
@@ -141,7 +147,16 @@ pub fn index(files: &[File]) -> Index {
     let mut names: Vec<(String, usize)> = files.iter().flat_map(|f| handles(f, &getters)).collect();
     names.sort();
     names.dedup();
-    Index { models: models(files), getters, names }
+    let (mut exported, mut derived) = (vec![], vec![]);
+    for f in files.iter().filter(|f| ORM_IMPORTED_HANDLE_LANGS.contains(&f.lang.name)) {
+        exported.extend(handles(f, &getters).into_iter().map(|(n, oi)| (f.path.clone(), n, oi)));
+        for (oi, o) in mine(f) {
+            for d in f.defs.iter().filter(|d| d.kind == Kind::Class && d.bases.iter().any(|b| o.handles.contains(&last_segment(b)))) {
+                derived.push((f.path.clone(), d.name.clone(), oi));
+            }
+        }
+    }
+    Index { models: models(files), getters, names, exported, derived }
 }
 
 /// the names that hold a session in this file: its own, and those declared elsewhere for an ORM it is written for
@@ -149,18 +164,56 @@ pub fn sessions(f: &File, ix: &Index) -> Vec<(String, usize)> {
     let mut out = handles(f, &ix.getters);
     let mine: Vec<usize> = mine(f).into_iter().map(|(oi, _)| oi).collect();
     out.extend(ix.names.iter().filter(|(_, oi)| mine.contains(oi)).cloned());
+    // `import { prisma } from './lib/prisma'`, `constructor(private prisma: PrismaService)` with PrismaService imported:
+    // the name, imported from the file that declares it, is the handle declared there
+    if ORM_IMPORTED_HANDLE_LANGS.contains(&f.lang.name) {
+        for (local, remote, path) in &f.bound_names {
+            out.extend(ix.exported.iter().filter(|(p, n, _)| p == path && n == remote).map(|(_, _, oi)| (local.clone(), *oi)));
+            for (_, _, oi) in ix.derived.iter().filter(|(p, n, _)| p == path && n == remote) {
+                out.extend(typed(f, &ORMS[*oi], local).into_iter().map(|n| (n, *oi)));
+            }
+        }
+    }
     out.sort();
     out.dedup();
     out
 }
 
-/// names a file holds a database session in: `db: Session`, `pool: &PgPool`, `db *gorm.DB`, `Connection $pdo`, `s = Session(..)`
-pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String, usize)> {
+/// names a file holds a value of type `ty` in, a handle of ORM `o`: `db: Session`, `q *db.Queries`, `Connection $pdo`, `s = Session(..)`
+fn typed(f: &File, o: &Orm, ty: &str) -> Vec<String> {
     const NOT_NAMES: &[&str] = &["return", "var", "func", "type", "struct", "chan", "go", "case", "range", "new", "mut", "let", "const", "use",
         "await", "extends", "implements", "typeof", "import", "export", "from", "default"];
-    let js = ORM_JS_SYNTAX.contains(&f.lang.name);
     // `const prisma = new PrismaClient()`
-    let new_kw = if js { r"(?:new\s+)?" } else { "" };
+    let new_kw = if ORM_JS_SYNTAX.contains(&f.lang.name) { r"(?:new\s+)?" } else { "" };
+    let mut out = vec![];
+    let ty = regex::escape(ty);
+    let forms = [
+        format!(r"(\$?\w+)\s*:\s*(?:&\s*(?:mut\s+)?|\*)?(?P<q>(?:\w+(?:\.|::))*){ty}\b"),
+        // `q *db.Queries`: the type may be named through its package
+        format!(r"(\$?\w+)\s+\*?(?:\w+\.)*{ty}\b"),
+        format!(r"\b{ty}\s+(\$\w+)"),
+        format!(r"(\$?\w+)\s*:?=\s*{new_kw}(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
+    ];
+    // `http: reqwest::Client`: a type named through a crate path is this ORM's only when the crate is
+    // or wraps its handle (`r2d2::Pool`); a path inside the project, `crate::db::Pool`, says nothing either way
+    let own_crate = |q: &str| {
+        let Some((first, _)) = q.split_once("::") else { return true };
+        let first = first.replace('-', "_");
+        ["crate", "self", "super"].contains(&first.as_str()) || o.libs.iter().chain(o.pools).any(|l| l.replace('-', "_") == first)
+    };
+    for re in forms {
+        for c in Regex::new(&re).unwrap().captures_iter(&f.code) {
+            if !NOT_NAMES.contains(&&c[1]) && c.name("q").is_none_or(|q| own_crate(q.as_str())) {
+                out.push(c[1].trim_start_matches('$').to_string());
+            }
+        }
+    }
+    out
+}
+
+/// names a file holds a database session in: `db: Session`, `pool: &PgPool`, `db *gorm.DB`, `Connection $pdo`, `s = Session(..)`
+pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String, usize)> {
+    let js = ORM_JS_SYNTAX.contains(&f.lang.name);
     let mut out = vec![];
     for (oi, o) in mine(f) {
         if js && orm_form(o.name).is_some_and(|x| x.called_handle) {
@@ -171,28 +224,7 @@ pub fn handles(f: &File, getters: &HashMap<String, Vec<Getter>>) -> Vec<(String,
             }
         }
         for ty in o.handles {
-            let ty = regex::escape(ty);
-            let forms = [
-                format!(r"(\$?\w+)\s*:\s*(?:&\s*(?:mut\s+)?|\*)?(?P<q>(?:\w+(?:\.|::))*){ty}\b"),
-                // `q *db.Queries`: the type may be named through its package
-                format!(r"(\$?\w+)\s+\*?(?:\w+\.)*{ty}\b"),
-                format!(r"\b{ty}\s+(\$\w+)"),
-                format!(r"(\$?\w+)\s*:?=\s*{new_kw}(?P<q>(?:\w+(?:\.|::))*){ty}\s*[(\[{{]"),
-            ];
-            // `http: reqwest::Client`: a type named through a crate path is this ORM's only when the crate is
-            // or wraps its handle (`r2d2::Pool`); a path inside the project, `crate::db::Pool`, says nothing either way
-            let own_crate = |q: &str| {
-                let Some((first, _)) = q.split_once("::") else { return true };
-                let first = first.replace('-', "_");
-                ["crate", "self", "super"].contains(&first.as_str()) || o.libs.iter().chain(o.pools).any(|l| l.replace('-', "_") == first)
-            };
-            for re in forms {
-                for c in Regex::new(&re).unwrap().captures_iter(&f.code) {
-                    if !NOT_NAMES.contains(&&c[1]) && c.name("q").is_none_or(|q| own_crate(q.as_str())) {
-                        out.push((c[1].trim_start_matches('$').to_string(), oi));
-                    }
-                }
-            }
+            out.extend(typed(f, o, ty).into_iter().map(|n| (n, oi)));
         }
     }
     // `db := common.GetDB()`: the function says what it hands back, when the call names that function
@@ -337,8 +369,10 @@ pub fn accesses(code: &str, lang: &str, handles: &[(String, usize)], models: &Ha
                 form.is_some_and(|f| f.member_models) && methods.len() > 1 && !o.reads.contains(x) && !o.writes.contains(x)
                     && x.starts_with(|c: char| c.is_ascii_lowercase())
             }).map(|x| format!("{}{}", x[..1].to_ascii_uppercase(), &x[1..]));
+            // where the model is the member, a query is `prisma.<model>.<verb>()` or a `$` call on the client itself (`prisma.$queryRaw`)
+            let unshaped = form.is_some_and(|f| f.member_models) && member_model.is_none() && !methods[0].starts_with('$');
             let model = member_model.unwrap_or_else(|| WORD.find_iter(&args).map(|x| x.as_str()).find(|x| models.contains_key(*x)).unwrap_or("database").to_string());
-            (read || write).then_some((write, model))
+            ((read || write) && !unshaped).then_some((write, model))
         } else if let (Some(model), false) = (instances.get(w), member) {
             let (_, write) = verbs(models[*model]);
             write.then(|| (true, model.to_string()))

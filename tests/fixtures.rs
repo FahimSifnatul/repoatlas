@@ -1868,6 +1868,65 @@ fn nextjs_file_routes() {
 }
 
 #[test]
+fn nextjs_catch_all_pages_routes() {
+    // only the last extension is the file's: catch-all and optional catch-all names are parameters, a dot in a folder stays
+    let d = analyze(&[
+        ("package.json", r#"{"name": "site", "scripts": {"dev": "next dev"}, "dependencies": {"next": "14"}}"#),
+        ("pages/api/[...slug].ts", "export default function handler(req, res) {\n  res.end()\n}\n"),
+        ("pages/api/auth/[...nextauth].ts", "export default function auth(req, res) {\n  res.end()\n}\n"),
+        ("pages/api/files/[[...slug]].ts", "export default function optional(req, res) {\n  res.end()\n}\n"),
+        ("pages/api/v1.0/ping.ts", "export default function ping(req, res) {\n  res.end()\n}\n"),
+    ]);
+    assert_eq!(route_heads(&d), ["ANY /api/auth/{nextauth} auth()", "ANY /api/files/{slug} optional()", "ANY /api/v1.0/ping ping()", "ANY /api/{slug} handler()"]);
+}
+
+#[test]
+fn prisma_through_a_shared_module_or_a_service() {
+    // a client declared in one file and imported by name in another
+    let d = analyze(&[
+        ("package.json", r#"{"name": "api", "main": "server.ts", "dependencies": {"@prisma/client": "5"}}"#),
+        ("lib/prisma.ts", "import { PrismaClient } from '@prisma/client'\n\nexport const prisma = new PrismaClient()\n"),
+        ("server.ts", "import { prisma } from './lib/prisma'\n\nasync function run(map, cache) {\n  map.get(k)\n  cache.delete(k)\n  await prisma.user.findMany()\n  await prisma.post.create({ data: {} })\n  await prisma.findMany()\n}\n\nrun()\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), ["reads User", "writes Post"]);
+    // NestJS: a service that extends the client, injected where it is imported
+    let d = analyze(&[
+        ("package.json", r#"{"name": "api", "main": "src/main.ts", "dependencies": {"@prisma/client": "5"}}"#),
+        ("src/prisma.service.ts", "import { Injectable } from '@nestjs/common'\nimport { PrismaClient } from '@prisma/client'\n\n@Injectable()\nexport class PrismaService extends PrismaClient {}\n"),
+        ("src/main.ts", "import { PrismaService } from './prisma.service'\n\nexport class UsersService {\n  constructor(private readonly prisma: PrismaService) {}\n\n  list() {\n    return this.prisma.user.findMany()\n  }\n\n  remove(id: string) {\n    return this.prisma.user.delete({ where: { id } })\n  }\n}\n\nnew UsersService(null).list()\nnew UsersService(null).remove('1')\n"),
+    ]);
+    // (each method is reached once per call site: the labels, once each)
+    let mut got = db_steps(&d, "");
+    let mut seen = vec![];
+    got.retain(|l| if seen.contains(l) { false } else { seen.push(l.clone()); true });
+    assert_eq!(got, ["reads User", "writes User"]);
+    // a plain object named prisma, not imported from the file that declares the client, is no handle
+    let d = analyze(&[
+        ("package.json", r#"{"name": "api", "main": "server.ts", "dependencies": {"@prisma/client": "5"}}"#),
+        ("lib/prisma.ts", "import { PrismaClient } from '@prisma/client'\n\nexport const prisma = new PrismaClient()\n"),
+        ("server.ts", "import { other } from './lib/prisma'\nconst prisma = { user: { findMany() { return [] } } }\n\nfunction run() {\n  return prisma.user.findMany()\n}\n\nrun()\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+    // outside JavaScript and TypeScript a name imported from a file that declares a session is read as before
+    let d = analyze(&[
+        ("db.py", "from sqlalchemy.orm import Session\n\nsession: Session = Session()\n"),
+        ("main.py", "from db import session\n\ndef run():\n    return session.query(1)\n\nif __name__ == \"__main__\":\n    run()\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+}
+
+#[test]
+fn a_model_made_by_a_call_is_named_like_a_class() {
+    // `const account = mongoose.model('Account', ..)` registers Account; a lower-case variable elsewhere is not a model
+    let d = analyze(&[
+        ("package.json", r#"{"name": "api", "main": "server.js", "dependencies": {"mongoose": "8"}}"#),
+        ("models.js", "const mongoose = require('mongoose')\nconst account = mongoose.model('Account', new mongoose.Schema({}))\nmodule.exports = { account }\n"),
+        ("server.js", "require('./models')\n\nasync function run(repo, account) {\n  const user = await repo.findOne()\n  user.save()\n  account.save()\n  account.deleteMany()\n}\n\nrun()\n"),
+    ]);
+    assert_eq!(db_steps(&d, ""), Vec::<String>::new());
+}
+
+#[test]
 fn nestjs_controllers() {
     let d = analyze(&[
         ("package.json", "{\"name\":\"x\",\"main\":\"src/main.ts\",\"dependencies\":{\"@nestjs/core\":\"10\"}}"),

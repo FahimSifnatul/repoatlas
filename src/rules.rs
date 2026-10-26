@@ -217,7 +217,8 @@ pub fn file_route(lang: &str, path: &str) -> Option<(&'static FileRoute, String)
             return None;
         }
         let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
-        let stem = file.split('.').next().unwrap_or(file);
+        // only the last extension: `[...slug].ts` -> `[...slug]`
+        let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
         let mut segs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
         match r.stem {
             Some(s) if s != stem => return None,
@@ -415,6 +416,10 @@ pub const ORM_LANGS_ALSO: &[(&str, &str)] = &[("JavaScript", "TypeScript")];
 pub fn orm_speaks(orm: &str, file: &str) -> bool {
     orm == file || ORM_LANGS_ALSO.iter().any(|(o, f)| *o == orm && *f == file)
 }
+
+/// languages where a handle travels by import: a name declared as a handle in one file (`export const prisma = new PrismaClient()`),
+/// or a class that extends a handle type (`class PrismaService extends PrismaClient`), is a handle where it is imported by name
+pub const ORM_IMPORTED_HANDLE_LANGS: &[&str] = JS_TS;
 
 /// languages whose ORM code is written the JavaScript way: a handle made by `new` (`prisma = new PrismaClient()`),
 /// an awaited model call that hands back an instance (`user = await User.findByPk(1)`), members named with `$` (`prisma.$queryRaw`)
