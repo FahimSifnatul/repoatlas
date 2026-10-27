@@ -59,7 +59,7 @@ Shown for the one-line install; with a clone, run `./install.sh` instead of `cur
 
 | Task | Command |
 |---|---|
-| Install a specific version | `curl -fsSL <url> \| REPOATLAS_VERSION=v2.0.1 sh` |
+| Install a specific version | `curl -fsSL <url> \| REPOATLAS_VERSION=v2.1.0 sh` |
 | Install elsewhere | `curl -fsSL <url> \| REPOATLAS_INSTALL_DIR=/usr/local/bin sh` |
 | Leave shell startup files alone | `curl -fsSL <url> \| sh -s -- --no-modify-path` |
 | Update | run the install command again |

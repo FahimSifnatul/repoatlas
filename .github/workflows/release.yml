@@ -5,7 +5,7 @@ name: release
 # Two ways to trigger it:
 #   - bump `version` in Cargo.toml and push to master: this tags vX.Y.Z on that commit and releases it
 #     (a push whose version is already tagged does nothing)
-#   - or push a tag such as v2.0.1 yourself; it must match the version in Cargo.toml
+#   - or push a tag such as v2.1.0 yourself; it must match the version in Cargo.toml
 on:
   push:
     branches: [master]

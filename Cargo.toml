@@ -1,6 +1,6 @@
 [package]
 name = "repoatlas"
-version = "2.0.1"
+version = "2.1.0"
 edition = "2021"
 description = "Turn any code repository into an interactive, layer-by-layer architecture map"
 license = "MIT"
