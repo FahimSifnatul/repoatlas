@@ -816,7 +816,10 @@ fn parse_tree(f: &mut File, src: &str, g: &lang::Grammar) {
                 // Hono `app.route('/users', users)`: a router handed over under a path is a mount (mounts.rs), not an endpoint
                 static ROUTER_NAME: LazyLock<Regex> = LazyLock::new(|| rx(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$"));
                 let mounts_router = crate::rules::lang_mount_call(f.lang.name, &name) && args.len() == 2 && ROUTER_NAME.is_match(&args[1]);
-                if INCLUDE.is_match(&handler) || sets_path || mounts_router {
+                // `this.client.get('/users')`: a path and nothing to run is a request being made, not an endpoint registered
+                let request_only = handler.is_empty() && in_routes_file.is_none() && on_chain.is_none() && !recv.is_empty()
+                    && ["get", "post", "put", "delete", "patch", "head", "options"].contains(&name.to_lowercase().as_str());
+                if INCLUDE.is_match(&handler) || sets_path || mounts_router || request_only {
                     // `path("api/", include("shop.urls"))` hands over a whole routes file: a mount, not an endpoint
                 } else {
                     // the whole object the route is registered on (`api.router`): any name in it may be the router that is mounted

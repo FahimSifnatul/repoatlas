@@ -227,7 +227,13 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             P = launches[p].via;
         }
         let mut said = toks(&L.name);
-        for w in words(&L.cmd) {
+        let cmd_words = words(&L.cmd);
+        // the tool that runs it (`vite`, `webpack serve`) is not what it does: `vite build` still says build
+        let tool_at = cmd_words.iter().take_while(|w| WRAPPERS.contains(w)).count();
+        for (wi, w) in cmd_words.iter().enumerate() {
+            if wi == tool_at && toks(w).iter().all(|t| matches!(TOKEN_LAYER.get(t.as_str()), Some(&"config"))) {
+                continue;
+            }
             if !w.contains(['/', '.', '$', '-']) {
                 said.extend(toks(w));
             }
@@ -402,7 +408,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
         }
         merged.push(P);
     }
-    merged.truncate(8);
+    let dropped: Vec<Proc> = if merged.len() > 8 { merged.split_off(8) } else { vec![] };
     let mut procs = merged;
     let mut names_: Tally<String> = Tally::default();
     for P in &procs {
@@ -711,7 +717,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
         for P in &procs {
             let mut walk = Walk::new(&ctx, MAX_STEPS);
             // the command names the function it runs (`pkg.cli:main`), else the file's own start
-            let func = P.chain.last().and_then(|c| words(&c.cmd).iter().find_map(|w| w.split_once(':').map(|x| x.1.to_string())));
+            let func = P.chain.last().and_then(|c| words(&c.cmd).iter().find_map(|w| w.split_once(':').map(|x| x.1.trim_end_matches("()").to_string())));
             let mut start_defs: Vec<Gid> = vec![];
             for s in &P.starts {
                 let fi = ix[s];
@@ -733,6 +739,17 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             let in_steps: HashSet<usize> = walk.steps.iter().map(|s| s.file).collect();
             let near: HashSet<&str> = in_steps.iter().flat_map(|&i| std::iter::once(files[i].path.as_str()).chain(files[i].uses.iter().map(|u| u.as_str()))).collect();
             let mut loaded: BTreeSet<usize> = conv.iter().filter(|(a, m)| near.contains(a.as_str()) && !in_steps.contains(&ix[m])).map(|(_, m)| ix[m]).collect();
+            // an import runs the top level of the file it names: setup done at import time (a connection, an app registered)
+            for s in &P.starts {
+                for q in files[ix[s]].uses.iter().filter_map(|u| ix.get(u).copied()) {
+                    let g = &files[q];
+                    if g.layer != Some("tests") && g.lang.grammar.is_some() && !in_steps.contains(&q) && !P.starts.contains(&g.path)
+                        && g.calls.iter().enumerate().any(|(ci, c)| c.def == 0 && !targets[q][ci].is_empty())
+                    {
+                        loaded.insert(q);
+                    }
+                }
+            }
             // files that load together with a package the journey passes through, and run something when they do
             let package_dirs: HashSet<(&str, &str)> = in_steps.iter().map(|&i| &files[i]).filter(|f| f.lang.package_loads).map(|f| (f.lang.name, dirname(&f.path))).collect();
             loaded.extend((0..files.len()).filter(|&q| {
@@ -749,6 +766,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             // web endpoints of the files this program loads
             let rs0 = route_starts.len();
             let mut routes = vec![];
+            let mut route_total = 0;
             // a shell script that starts something else does not answer its requests
             let shell_only = P.starts.iter().all(|s| files[ix[s]].lang.name == "Shell");
             for p in fr.iter().filter(|p| !shell_only && lay(&files, p) != "tests") {
@@ -907,6 +925,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
                 for (verb, path, line, hs, pre, guess) in found {
                     // the map covers every endpoint, though the list below it stops at MAX_ROUTES
                     route_starts.extend(pre.iter().chain(hs.iter()).copied());
+                    route_total += 1;
                     if routes.len() >= MAX_ROUTES {
                         continue;
                     }
@@ -1000,8 +1019,11 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             }
             text += ".";
             if !routes.is_empty() {
-                let n = routes.len();
+                let n = route_total;
                 text += &format!(" It answers {n} {} of web request.", if n == 1 { "kind" } else { "kinds" });
+                if n > routes.len() {
+                    text += &format!(" The first {} are listed.", routes.len());
+                }
             }
             let say = |way: &str| -> Vec<String> {
                 let mut v: Vec<String> = vec![];
@@ -1031,7 +1053,7 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             let io_map: Map<String, Value> = io_files.iter().map(|(i, fs)| (IO[*i].key.to_string(), json!(fs))).collect();
             out.push(json!({
                 "name": P.name, "command": short(&P.cmd), "narrative": text, "entries": P.starts, "chain": chain_files,
-                "steps": steps_json(&ctx, &steps), "routes": routes.into_iter().map(|r| r.0).collect::<Vec<_>>(),
+                "steps": steps_json(&ctx, &steps), "routes_total": route_total, "routes": routes.into_iter().map(|r| r.0).collect::<Vec<_>>(),
                 "parts": parts, "io": io_map,
             }));
         }
@@ -1097,9 +1119,12 @@ pub fn analyze_with(root: &Path, name: &str, scip: Option<&Path>) -> Result<Valu
             "parts": map_units, "io": map_io, "runs": runs, "lanes": lanes,
             "edges": map_edges.into_iter().map(|((a, b), (n, cv))| if cv { json!([a, b, n, 1]) } else { json!([a, b, n]) }).collect::<Vec<_>>(),
         });
-        let mut unreached: Vec<&String> = ulayer.keys().filter(|u| !map_units.contains(*u) && shown(u)).collect();
+        // programs past the eighth are not drawn, but their parts are not dead code either
+        let dropped_units: HashSet<&String> = dropped.iter().flat_map(|P| P.starts.iter()).filter_map(|s| unit_of.get(s)).collect();
+        let mut unreached: Vec<&String> = ulayer.keys().filter(|u| !map_units.contains(*u) && shown(u) && !dropped_units.contains(*u)).collect();
         unreached.sort_by_key(|u| (ulayer[*u] == "config", std::cmp::Reverse(nodes[*u].loc), u.to_string()));
-        flow = json!({"kind": entry_kind, "processes": out, "map": flow_map, "unreached": unreached});
+        let more_programs: Vec<&String> = dropped.iter().map(|P| &P.name).collect();
+        flow = json!({"kind": entry_kind, "processes": out, "map": flow_map, "unreached": unreached, "more_programs": more_programs});
     }
 
     // ---- repository summary

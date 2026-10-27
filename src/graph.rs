@@ -247,7 +247,12 @@ impl<'a> Index<'a> {
                 break;
             }
             for k in self.classes.get(&(fam, c.as_str())).into_iter().flatten() {
-                todo.extend(self.def(*k).bases.iter().cloned());
+                // the stack pops the last one first: Python, C++ and C# look in the first base first; Scala traits and Ruby mixins, the last
+                if matches!(fam, "Scala" | "Ruby") {
+                    todo.extend(self.def(*k).bases.iter().cloned());
+                } else {
+                    todo.extend(self.def(*k).bases.iter().rev().cloned());
+                }
             }
         }
         if overrides && !out.is_empty() {
@@ -288,6 +293,19 @@ impl<'a> Index<'a> {
         v.dedup();
         v.truncate(6);
         v
+    }
+
+    /// a type with no methods of its own whose implementations sit in other packages (Go: the interface is not named where it is
+    /// satisfied): every method of that name in the repo, when there are few enough to be a fair guess
+    fn implementors_wide(&self, fam: &'static str, ty: &str, name: &str, fi: usize) -> Vec<Gid> {
+        if !self.classes.contains_key(&(fam, ty)) {
+            return vec![];
+        }
+        let mut v: Vec<Gid> = self.any_method.get(&(fam, name)).into_iter().flatten().copied()
+            .filter(|g| self.live(*g, fi) && self.def(*g).owner.as_deref() != Some(ty)).collect();
+        v.sort();
+        v.dedup();
+        if (1..=6).contains(&v.len()) { v } else { vec![] }
     }
 
     /// top-level definitions called `name` in the given files (a function nested in another counts only in its own file)
@@ -616,6 +634,10 @@ impl<'a> Index<'a> {
             if !v.is_empty() {
                 return (v, Conf::Near);
             }
+            let v = self.implementors_wide(fam, cls, name, fi);
+            if !v.is_empty() {
+                return (v, Conf::Guess);
+            }
         }
         // 10. x.y() on an object of unknown type: the method of that name, or "one of N" when several classes have it
         let word = receiver_word(recv).replace('_', "");
@@ -756,7 +778,7 @@ fn norm(s: &str) -> String {
 /// A name given two different classes says nothing.
 fn var_types(f: &File, ix: &Index, fam: &'static str, code: &str) -> HashMap<String, String> {
     static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?m)(?:^\s*|[;{(]\s*|\b(?:const|let|var|val|auto|my|local)\s+)((?:self\.|this\.|@|\$this->)?[A-Za-z_]\w*)\s*(?::\s*[\w.<>\[\]]+\s*)?:?=\s*(?:new\s+|&)?([A-Za-z_]\w*)\s*[({]").unwrap()
+        Regex::new(r"(?m)(?:^\s*|[;{(]\s*|\b(?:const|let|var|val|auto|my|local)\s+)((?:self\.|this\.|@|\$this->)?[A-Za-z_]\w*)\s*(?::\s*[\w.<>\[\]]+\s*)?:?=\s*(?:new\s+|&)?(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*[({]").unwrap()
     });
     let mut out: HashMap<String, String> = HashMap::new();
     let mut bad: HashSet<String> = HashSet::new();

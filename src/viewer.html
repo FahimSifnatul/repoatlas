@@ -842,7 +842,7 @@ function flowView(j0, k0) {
       all.map((P, j) => el('option', {value:j}, P.name))) : el('h3', {}, 'Program'),
     all.map((P, j) => el('div', {class:'prog'},   // only the picked program's journeys are shown (see show)
       mk(j, -1, svg('flag', 14), el('span', {}, all.length > 1 ? 'Whole program' : P.name)),
-      P.routes.length ? [el('h3', {}, 'Web requests'), ...routesOf(P, j)] : null)));
+      P.routes.length ? [el('h3', {}, 'Web requests'), ...routesOf(P, j), P.routes_total > P.routes.length ? el('p', {}, `+${P.routes_total - P.routes.length} more not listed`) : null] : null)));
   rail.querySelectorAll('.prog').forEach((b, j) => { b.dataset.j = j; });
   const railPick = rail.querySelector('.rail-pick');
   const pick = el('select', {class:'pick', 'aria-label':'Pick a journey', onchange:e => { const [j, k] = e.target.value.split('/').map(Number); choose(j, k); }},
@@ -891,6 +891,7 @@ function flowView(j0, k0) {
     map ? [sec('The map', 'The parts this journey passes through, as a small city. Each box is a building and its kind says what it does. Boxes run left to right in the order the calls reach them, and each one appears once, below the box that first calls it; the steps list every call. Roads run from a part to the parts it calls, and cars drive the way the calls go; dotted paths lead to parts the framework loads or that are imported but not called. Hover a building to follow its roads, or click it to open it.'), map.legend, map.el] : null,
     detail);
   show(sj, sk);
+  if ((D.flow.more_programs || []).length) pane.append(el('p', {}, `${D.flow.more_programs.length} more programs not drawn: ${D.flow.more_programs.join(', ')}`));
   if (D.flow.unreached.length) pane.append(sec('Not on any journey', 'Nothing above starts or loads these. They run some other way (a separate command, the framework itself) or are not used.'), grid(D.flow.unreached, true));
   f.append(el('div', {class:'trace' + (solo ? ' solo' : '')}, solo ? null : rail, pane));
   return f;
